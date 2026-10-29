@@ -393,7 +393,7 @@ function readTheme(el) {
   const cs = getComputedStyle(el);
   const v = (name, fallback) => cs.getPropertyValue(name).trim() || fallback;
   return {
-    bg: v('--surface', '#ffffff'), neutral: v('--border-strong', '#c9d0da'),
+    bg: v('--plot-bg', '#ffffff'), neutral: v('--plot-neutral', '#c9d0da'),
     text: v('--text', '#18212c'), muted: v('--text-muted', '#566273'),
   };
 }
@@ -834,7 +834,7 @@ export function spatialViewer({ runId, store, binUm: binUmOption, emptyText }) {
           dataset: { key: e.key }, title: 'Click to hide or show; Alt+click to show only this entry',
           onClick: (ev) => toggle(e.key, ev.altKey),
         },
-        h('span', { class: 'swatch', style: { background: e.color === NEUTRAL ? 'var(--border-strong)' : e.color } }),
+        h('span', { class: 'swatch', style: { background: e.color === NEUTRAL ? 'var(--plot-neutral)' : e.color } }),
         h('span', { class: 'sv-item-label' }, e.label),
         h('span', { class: 'sv-item-count' }, fmt.int(e.count))))));
     }

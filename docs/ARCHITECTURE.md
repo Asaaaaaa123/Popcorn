@@ -329,8 +329,9 @@ poll(), copyText(), clone(), state.health, refreshHealth(), route(), navigate(),
 danger, ghost, small, icon-only), .input/.select/.textarea, .field, .form-grid, .switch, .tabs, .badge(-status),
 .chip(.ok/.warn/.bad/.core), .table-wrap/.table, .kv, .metric, .progress, .log, .banner, .modal, .toast, .empty,
 .grid-2/.grid-3/.grid-auto, .row, .stack, .legend, .prose. Use them; put view-specific rules in css/project.css
-(projects, project editor, ROI editor) or css/run.css (runs, results, viewers). Light and dark themes come from CSS
-variables only — never hard-code colors except data colors (signature/sample palettes).
+(projects, project editor, ROI editor) or css/run.css (runs, results, viewers). The interface has one dark theme; its
+colors come from the CSS variables on `:root` only — never hard-code colors except data colors (signature/sample
+palettes).
 
 Routes (main.js, already written) and the view modules they call — each export renders into `container` and may
 return a cleanup function (stop timers, remove listeners):

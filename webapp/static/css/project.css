@@ -82,7 +82,7 @@ button.vchip { cursor: pointer; }
 .unsaved-bar {
   position: sticky; bottom: 14px; z-index: 30; margin-top: 22px;
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 14px;
-  background: var(--surface); color: var(--text); border: 1px solid color-mix(in srgb, var(--warning) 45%, var(--border));
+  background: var(--surface-2); color: var(--text); border: 1px solid color-mix(in srgb, var(--warning) 45%, var(--border));
   border-left: 4px solid var(--warning); border-radius: var(--radius); box-shadow: var(--shadow-lg);
 }
 .unsaved-bar > .icon { color: var(--warning); }
@@ -176,12 +176,13 @@ button.vchip { cursor: pointer; }
 
 /* ---------------------------------------------------------------- parameters tab */
 .pf-layout { display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 22px; align-items: start; }
-.pf-nav { position: sticky; top: 16px; display: flex; flex-direction: column; gap: 2px; }
+.pf-nav { position: sticky; top: 16px; display: flex; flex-direction: column; gap: 1px; padding-left: 2px; border-left: 1px solid var(--border); }
 .pf-nav-item {
-  border: 0; background: none; padding: 6px 10px; border-radius: var(--radius-sm); text-align: left;
-  color: var(--text-muted); font: 13px var(--font); cursor: pointer;
+  margin-left: -3px; border: 0; border-left: 2px solid transparent; background: none; padding: 6px 12px;
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0; text-align: left; line-height: 1.35;
+  color: var(--text-muted); font: 12.5px var(--font); cursor: pointer;
 }
-.pf-nav-item:hover { background: var(--surface-2); color: var(--text); }
+.pf-nav-item:hover { background: var(--surface-2); color: var(--text); border-left-color: var(--accent-text); }
 .pf-cards { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
 .pf-card { scroll-margin-top: 16px; }
 .pf-grid { gap: 16px 22px; }
@@ -268,7 +269,7 @@ button.vchip { cursor: pointer; }
 .roi-zoom { gap: 2px; }
 .roi-viewport {
   position: relative; overflow: hidden; height: clamp(420px, calc(100vh - 300px), 920px);
-  background: var(--surface-3); cursor: grab; touch-action: none; user-select: none; outline: none;
+  background: var(--plot-bg); cursor: grab; touch-action: none; user-select: none; outline: none;
 }
 .roi-viewport:focus-visible { box-shadow: inset 0 0 0 2px var(--accent); border-radius: 0; }
 .roi-viewport[data-mode="draw"] { cursor: crosshair; }
@@ -313,6 +314,9 @@ button.vchip { cursor: pointer; }
 .plan-samples, .plan-steps { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 5px; }
 .plan-samples li { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .plan-step { display: flex; align-items: center; gap: 8px; font-size: 13px; flex-wrap: wrap; }
+.plan-step:not(.slow) { flex-wrap: nowrap; align-items: flex-start; }
+.plan-step:not(.slow) > .icon { margin-top: 3px; }
+.plan-step > span { min-width: 0; }
 .plan-step > .icon { color: var(--success); }
 .plan-step.off { color: var(--text-faint); }
 .plan-step.off > .icon { color: var(--text-faint); }

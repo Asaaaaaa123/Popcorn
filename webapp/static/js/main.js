@@ -1,4 +1,4 @@
-// main.js — application shell: sidebar navigation, environment status, theme switch and the route table.
+// main.js — application shell: sidebar navigation, environment status and the route table.
 import { h, icon, mount, route, startRouter, onRouteChange, refreshHealth, state, poll, svg, button } from './core.js';
 import { renderProjects } from './views/projects.js';
 import { renderProject } from './views/project.js';
@@ -6,26 +6,15 @@ import { renderRuns } from './views/runs.js';
 import { renderRun } from './views/run.js';
 import { renderHelp } from './views/help.js';
 
-const THEME_KEY = 'bss-theme';
-const THEMES = ['auto', 'light', 'dark'];
-
-function storedTheme() {
-  try { return localStorage.getItem(THEME_KEY) || 'auto'; } catch { return 'auto'; }
-}
-
-function applyTheme(theme) {
-  if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme;
-  else delete document.documentElement.dataset.theme;
-}
-
 function brandMark() {
-  // a 4 x 4 grid of capture bins, a few of them "positive"
-  const colors = ['#9fd3ea', '#ffffff', '#ffffff', '#f4a6a6', '#ffffff', '#f6c667', '#9fd3ea', '#ffffff',
-    '#ffffff', '#9fd3ea', '#f4a6a6', '#ffffff', '#f6c667', '#ffffff', '#ffffff', '#9fd3ea'];
-  const s = svg('svg', { viewBox: '0 0 32 32', class: 'brand-mark', 'aria-hidden': 'true' },
-    svg('rect', { width: 32, height: 32, rx: 8, fill: '#2b6c8c' }));
-  colors.forEach((c, i) => {
-    s.append(svg('rect', { x: 5 + (i % 4) * 6, y: 5 + Math.floor(i / 4) * 6, width: 4, height: 4, rx: 1.2, fill: c, opacity: c === '#ffffff' ? 0.35 : 1 }));
+  // a 3 x 3 grid of capture bins on the accent tile, the "positive" ones solid
+  const on = [1, 0, 1, 0, 1, 1, 1, 1, 0];
+  const s = svg('svg', { viewBox: '0 0 28 28', class: 'brand-mark', 'aria-hidden': 'true' },
+    svg('defs', null, svg('linearGradient', { id: 'brand-grad', x1: 0, y1: 0, x2: 1, y2: 1 },
+      svg('stop', { offset: '0', 'stop-color': '#4d8bff' }), svg('stop', { offset: '1', 'stop-color': '#2353c9' }))),
+    svg('rect', { width: 28, height: 28, rx: 7, fill: 'url(#brand-grad)' }));
+  on.forEach((v, i) => {
+    s.append(svg('rect', { x: 6 + (i % 3) * 6, y: 6 + Math.floor(i / 3) * 6, width: 4.2, height: 4.2, rx: 1, fill: '#ffffff', opacity: v ? 0.95 : 0.3 }));
   });
   return s;
 }
@@ -45,20 +34,7 @@ function buildShell() {
   });
   const envDot = h('span', { class: 'dot' });
   const envText = h('span', null, 'Checking environment…');
-  const envSub = h('div', { class: 'faint', style: 'font-size:11px;margin-bottom:8px' });
-  const themeBtn = h('button', { class: 'btn ghost small', title: 'Switch between automatic, light and dark theme' });
-  const paintTheme = () => {
-    const t = storedTheme();
-    mount(themeBtn, icon(t === 'dark' ? 'moon' : t === 'light' ? 'sun' : 'layers', { size: 14 }),
-      h('span', null, `Theme: ${t}`));
-  };
-  themeBtn.addEventListener('click', () => {
-    const next = THEMES[(THEMES.indexOf(storedTheme()) + 1) % THEMES.length];
-    try { localStorage.setItem(THEME_KEY, next); } catch { /* storage unavailable */ }
-    applyTheme(next);
-    paintTheme();
-  });
-  paintTheme();
+  const envSub = h('div', { class: 'env-sub' });
 
   const banner = h('div', { id: 'global-banner' });
   const view = h('main', { id: 'view' });
@@ -66,8 +42,10 @@ function buildShell() {
     h('aside', { class: 'sidebar' },
       h('div', { class: 'brand' }, brandMark(),
         h('div', null, h('div', { class: 'brand-name' }, 'Bone Spatial Studio'), h('div', { class: 'brand-sub' }, 'Visium HD bone lesion analysis'))),
+      h('div', { class: 'nav-label' }, 'Workspace'),
       h('nav', { class: 'nav' }, links.map((l) => l.el)),
-      h('div', { class: 'sidebar-foot' }, h('div', { class: 'env-line' }, envDot, envText), envSub, themeBtn)),
+      h('div', { class: 'sidebar-foot' },
+        h('div', { class: 'env-card' }, h('div', { class: 'env-line' }, envDot, envText), envSub))),
     h('div', { style: 'flex:1 1 auto;min-width:0;display:flex;flex-direction:column' }, banner, view));
 
   onRouteChange((path) => {
@@ -111,7 +89,6 @@ route('/runs', async (container) => renderRuns(container, {}));
 route('/runs/:id/:tab?', async (container, p) => renderRun(container, { id: p.id, tab: p.tab || null }));
 route('/help/:topic?', async (container, p) => renderHelp(container, { topic: p.topic || null }));
 
-applyTheme(storedTheme());
 const viewRoot = buildShell();
 poll(async () => { await refreshHealth(); return true; }, 5000);
 startRouter(viewRoot);
