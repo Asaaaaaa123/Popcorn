@@ -1,0 +1,17 @@
+# Raw Visium HD data and analysis outputs stay on this computer (size; unpublished data)
+data/
+results/
+workspace/
+*.h5ad
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Local tool settings and OS files
+.claude/
+.DS_Store
+Thumbs.db

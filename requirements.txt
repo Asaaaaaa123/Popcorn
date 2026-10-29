@@ -1,0 +1,39 @@
+# Bone Spatial Studio: Python 3.10 or newer (developed and tested with Python 3.12).
+#   python -m pip install -r requirements.txt
+# The exact versions of the tested environment (the versions stated in bone_analysis.py) are in
+# requirements-lock.txt:  python -m pip install -r requirements-lock.txt
+
+# ---- analysis (bone_analysis.py, bone_figures.py) ----
+scanpy>=1.10,<2
+anndata>=0.10,<0.14
+numpy>=1.26,<3
+pandas>=2.1,<4
+scipy>=1.11,<2
+scikit-learn>=1.3,<2
+statsmodels>=0.14,<0.16
+igraph>=0.11,<2
+leidenalg>=0.10,<0.13
+# scanpy (<= 1.11) uses pynndescent for neighbour graphs of 4,096 bins or more; pynndescent 0.6+ returns scipy sparse
+# arrays, on which scanpy 1.11 calls the removed getnnz() and stops with an AttributeError.
+pynndescent>=0.5.13,<0.6
+# Harmony integration of the sections (clustering.harmony). Optional: without it the neighbour graph of the Leiden
+# domains is built on the PCA embedding.
+harmonypy>=0.0.9,<0.1
+pyarrow>=14
+h5py>=3.9
+matplotlib>=3.8,<4
+pillow>=10
+
+# ---- web application (webapp/) ----
+fastapi>=0.110
+uvicorn>=0.29
+
+# ---- tests (tests/) ----
+pytest>=8
+httpx>=0.27
+
+# ---- optional ----
+# squidpy computes Moran's I for Supplementary Figure S2 when it is installed. Without it, bone_analysis.py computes
+# Moran's I itself (same numbers), so squidpy is not installed by default (it brings many large dependencies).
+# To use it anyway, uncomment:
+# squidpy>=1.4,<2
