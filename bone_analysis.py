@@ -1281,6 +1281,9 @@ def morans_i(adata, n_svg=2000, n_consensus=200, samples=None, progress=None):
             sq.gr.spatial_autocorr(sub, mode="moran", genes=genes, n_perms=None, n_jobs=1)
             res = sub.uns["moranI"]
             if "pval_norm" in res:
+                # [FIX] for a zero-variance gene (I = NaN) squidpy's P value is not defined, yet it sometimes holds a
+                # denormal leftover (1e-311) instead of NaN, so reruns differed; it is set to NaN like the built-in path
+                res.loc[res["I"].isna(), "pval_norm"] = np.nan
                 res["pval_norm_fdr_bh"] = _bh_on_finite(res["pval_norm"].to_numpy())
         else:
             res = _morans_i_builtin(sub, genes)
