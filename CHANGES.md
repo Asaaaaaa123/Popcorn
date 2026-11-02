@@ -233,24 +233,107 @@ becomes a warning. The step first flags the cross-captured A549 lesion: per-bin 
 
 ## Status
 
-* Tested on the synthetic demo data: every module, its figure and the integration. 196 tests pass. One end-to-end
-  comparison fails only when run after the API tests: for one zero-variance gene, a Moran's I P value is NaN in one run and
-  0 in the other, which suggests the squidpy and built-in paths differ. It does not involve the sensitivity step. Not yet
-  resolved.
-* **Not yet run on SR007144.** The numbers quoted above come from the review's own checks on the existing results. The
-  sensitivity tables for the real data will come from the next run (about 25 minutes).
+* All 199 tests pass. With the sensitivity step on and off, every manuscript table is identical (end-to-end test).
+* A last fix came from that comparison. For a gene with zero variance in a section, squidpy's undefined Moran P value
+  sometimes held a denormal leftover (1e-311) instead of NaN, so reruns were not identical. It is now NaN, as on the
+  built-in path.
+* The SR007144 run with the sensitivity step and the three-gene-set check is in `results/SR007144_second_review/`
+  (configuration `results/second_review_config.json`; 19 minutes, the sensitivity step 3.3 minutes). It drew 18 figures
+  with no errors. Every manuscript number equals the previous run, apart from the corrected fold columns.
+
+## Results of the sensitivity analyses on SR007144
+
+**Figure 4i** (`sensitivity_Figure4i_summary.csv`; pooled, depth-matched calls, mean and range over 5 draws).
+
+| Null model | Control | Tumor-bearing | Ratio of ratios |
+|---|---|---|---|
+| both sets at random (manuscript) | 1.75 (1.54–1.85) | 2.76 (2.57–2.88) | 1.58 (1.49–1.67); published draw 1.66 |
+| osteoclasts kept, osteoblasts at random | 0.35 | 0.44 | 1.26 (1.10–1.33) |
+| osteoblasts kept, osteoclasts at random | 1.70 | 2.77 | 1.63 |
+| osteoclasts kept, osteoblasts at random among bone-lineage bins | 1.03 (P ≥ 0.5) | 1.70 | 1.64 |
+| labels permuted among the positive bins | 3.77 | 5.44 | 1.45 |
+
+* **Decomposition.** The manuscript ratio is an osteoblast-specific factor (0.40 control, 0.44 tumor: closer than the
+  average ROI bin) times an osteoclast-pattern factor (4.35, 6.54).
+* **Other call sets.** With the unpooled calls the control is not estimable (7 osteoclast bins). In the tumor section
+  the ratio is 1.21 under the manuscript null, 0.29 with the osteoclasts kept, and 0.93 under the habitat null.
+* **Call stability.** In the tumor ROI, 70–73% of the bins ever called positive in one of the 5 draws are not called
+  in all of them.
+* **Reading.** The "farther than chance" result comes from the null model. Keeping the osteoclast pattern makes the
+  osteoblasts closer than chance in both limbs. Only the habitat null leaves a tumor-limb excess (1.70 vs 1.03), and only
+  with pooled calls; it depends on how the habitat is defined (here, bins assigned to bone-lineage signatures plus every
+  call).
+
+**Proximity** (`sensitivity_proximity.csv`; difference to depth-matched ROI bins, 200 µm block-bootstrap 95% CI).
+* Tumor-bearing macrophage → osteoclast: 28.1% observed vs 31.9% expected. The difference is −3.7 pp (−8.8 to +2.4),
+  or −8.4 pp without the co-positive bins. **There is no enrichment.** The control is not estimable (4 macrophage bins).
+* Fibroblast → osteoblast, control: +59.7 pp (27.3 to 78.2). The co-location is robust.
+* Fibroblast → osteoblast, tumor-bearing: +3.3 pp (−4.4 to +10.9), not distinguishable from 0. With the depth-matched
+  assignment it is +11.6 pp (4.2 to 20.6).
+
+**Positivity** (`sensitivity_positivity_folds.csv`; tumor/control fold at native depth, manuscript value first).
+
+| Signature | Manuscript | Block-bootstrap CI | Other ROIs | No veto | min_core 1 | Depth-matched (cap / quantile / ROI quantile) |
+|---|---|---|---|---|---|---|
+| osteoclast | 171 | 70–unbounded | 144–166 | 100 | 18.7 | 87 / 111 / 133 |
+| osteoblast | 21.0 | 11.5–46 | 15.5–21.9 | 21.2 | 4.7 | 9.0 / 11.9 / 14.5 |
+| osteocyte | 10.7 | 4.5–40 | 7.1–11.5 | 10.7 | 1.8 | 5.4 / 7.3 / 8.0 |
+| macrophage | 70 | 32–299 | 53–84 | 18.7 | 6.5 | 61 / 36 / 53 |
+| fibroblast | 13.2 | 7.0–33 | 12.5–14.0 | 13.2 | 2.0 | 3.2 / 6.6 / 8.6 |
+| granulocyte | 0.04 | 0.03–0.06 | 0.03–0.04 | 0.04 | 0.10 | 0.04 / 0.03 / 0.03 |
+| erythroid | 0.03 | 0.01–0.06 | 0.02–0.03 | 0.03 | 0.04 | 0.03 / 0.01 / 0.02 |
+
+* **Directions.** Every direction holds in every variant.
+* **What the magnitudes depend on.** min_core: with one core gene, osteocyte and fibroblast fall to about 2-fold. The
+  competitor veto drives macrophage (70 → 19). The depth scheme matters for all of them.
+* **ROI composition.** The manuscript ROI is 44.5% skeletal-muscle-assigned in the control and 16.6% in the tumor section.
+* **Lesion.** The A549 lesion flag covers 7.5% of the tumor ROI.
+* **Exclusion rules.** The nerve and smooth-muscle percentiles are 0. Together the exclusions remove 27% of the tumor
+  osteoclast-positive bins and 37% of the macrophage-positive bins.
+* **Native thresholds** remove at most 7 bins per signature. After depth matching they are negative (except macrophage).
+
+**Figure 4h** (`sensitivity_Figure4h_*.csv`).
+* **Compartment rule.** The threshold is 0, so the growth-plate side is "at least one chondrocyte-gene UMI"; all 116 such
+  bins are in RL-1-5.
+* **Anatomy.** The only chondrocyte-dense region (70 bins, RL-1-5) has 2 osteoclast-positive bins within 100 µm. Neither
+  is a manuscript growth-plate bin. The anatomical contrast is therefore not meaningful.
+* **Significant genes (growth-plate / tumor-associated):**
+
+  | Test | Growth-plate | Tumor-associated |
+  |---|---|---|
+  | manuscript | 69 | 6 |
+  | ROI only | 29 | 2 |
+  | depth-adjusted | 13 | 11 |
+  | spatial pseudobulk | 6 | 1 |
+
+* **Drawn genes.** Acp5 and Ctsk hold in the ROI-only and depth-adjusted tests. Mmp9, Itm2b and mt-Co2 hold only when
+  the outside-ROI bins are kept. Jdp2 and Mmp13 become significant once depth is adjusted.
+
+**Supplementary S5** (`sensitivity_FigureS5_*`, `sensitivity_leiden_*`).
+* **Unresolved share.** 18.3% of control bins vs 42.3% of tumor-bearing bins are unresolved. 70% of the tumor-section
+  lesion bins are unresolved.
+* **Domain labels.** Domain 1 (34,316 bins; 30% skeletal muscle, 23% osteoblast, 20% osteoclast) is labelled
+  "chondrocyte-enriched". Domain 7 has no significant marker, and domain 36 is defined by one gene.
+* **Without Harmony.** The raw partition has an ARI of 0.44 against the Harmony partition (seed-to-seed median 0.61). 33%
+  of tumor-section bins then fall in tumor-specific clusters, against 0.5% with Harmony.
+
+**Three-gene-set check** (`gene_set_sensitivity_three_gene_sets.csv`). Tumor > control in all 12 contrasts.
+* Osteoclast, native: canonical 0 vs 190 bins (no ratio), original lists 120-fold, Table 1 171-fold.
+* Osteoblast, depth-matched: 2.8-, 6.0- and 9.0-fold. The original osteoblast list is mostly Col1a1 + Col1a2 detection;
+  Bglap is absent.
 
 ## Recommended next changes
 
-These are decisions for the authors. Each changes manuscript numbers or text, so none is applied by default. Run the
-sensitivity analyses on SR007144 first and decide from their tables.
+These are decisions for the authors. Each changes manuscript numbers or text, so none is applied by default. The
+results above support them.
 
 1. **Figure 4i: replace the null, or the claim.**
    * Report the distance against a null that keeps the osteoclast pattern (`fixed_b`, or `habitat_fixed_b` restricted to
      bone-lineage bins), averaged over depth-matching draws (mean and range), next to the manuscript's complete
      spatial randomness.
-   * Withdraw "osteoblasts farther than chance" and "uncoupling in the tumor-bearing limb" unless the pattern-preserving
-     nulls support them. On the review's checks they do not.
+   * Withdraw "osteoblasts farther than chance". Keep "uncoupling in the tumor-bearing limb" only as a hypothesis, and only
+     if it survives a better-defined bone-surface habitat. Here it appears only under the habitat null with pooled calls
+     (1.70 vs 1.03), and not with unpooled calls (0.93).
    * For a formal test, use a cross-type K or pair-correlation function with spatial-block inference.
 2. **Figure 4h: define the growth plate by anatomy, or rename the contrast.**
    * Draw the physis on the H&E and set `sensitivity_analyses.compartments.growth_plate_masks`. The ROI editor would
@@ -287,8 +370,8 @@ sensitivity analyses on SR007144 first and decide from their tables.
    * One animal and one section per condition: avoid inferential language about the tumor effect, and present bin-level
      intervals as within-section only.
    * More animals are the only remedy for population-level claims.
-10. **Software.**
-    * Run the analysis on SR007144 with the sensitivity step.
-    * Resolve the Moran's I test-order issue.
+10. **Software.** (Done: the SR007144 run with the sensitivity step, and the Moran's I rerun difference.)
     * Add growth-plate regions to the ROI editor.
+    * Make the bone-surface habitat of the Figure 4i null configurable beyond tissue classes (for example bins within a
+      distance of a bone-lineage call), since the habitat result depends on it.
     * If the authors adopt items 3–5, move the non-target baseline and the block-bootstrap intervals into the main tables.
