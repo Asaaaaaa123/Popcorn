@@ -24,14 +24,20 @@ COLUMNS = {
                                                     "pct_positive", "ci_lo", "ci_hi", "mean_score",
                                                     "fold_vs_reference", "fold_tumor_over_control"],
     "Figure4g_6a_positivity_depth_matched.csv": ["signature", "sample", "pct_positive_mean", "pct_positive_sd",
-                                                 "n_positive_mean", "n_bins", "mean_score"],
+                                                 "n_positive_mean", "n_bins", "mean_score", "ci_lo", "ci_hi"],
     "leiden_domain_screen.csv": ["domain", "n_bins", "ubiquitous_fraction", "median_genes_per_umi", "top_markers",
                                  "de_uninterpretable"],
-    "Figure4h_osteoclast_compartment_DE.csv": ["group", "names", "scores", "logfoldchanges", "pvals", "pvals_adj"],
+    "Figure4h_osteoclast_compartment_DE.csv": ["group", "names", "scores", "pvals", "pvals_adj", "log2fc_mean_cp10k",
+                                               "pct_group", "pct_rest", "selection_gene"],
+    "Figure4h_compartment_summary.csv": ["sample", "threshold", "threshold_is_zero", "pct_bins_above_threshold",
+                                         "n_growth_plate", "n_tumor_associated", "n_non_growth_plate_control",
+                                         "n_growth_plate_outside_roi", "n_tumor_associated_outside_roi",
+                                         "median_umi_growth_plate", "median_umi_tumor_associated"],
     "Figure3a_program_composition_native.csv": ["sample", "program", "n_bins", "pct_of_all_bins",
                                                 "pct_of_assigned_bins", "sample_ambiguous_pct"],
     "leiden_seed_stability_adjusted_rand_index.csv": ["seed_a", "seed_b", "n_clusters_a", "n_clusters_b", "ARI"],
-    "FigureS5_unresolved_bins.csv": ["unresolved_bins", "all_bins", "percent"],
+    "FigureS5_unresolved_bins.csv": ["sample", "unresolved_bins", "all_bins", "percent", "unresolved_bins_roi",
+                                     "all_bins_roi", "percent_roi"],
     "Figure4i_observed_to_null_summary.csv": ba.UNCOUPLING_COLUMNS,
     "Figure4i_distance_distributions_observed_and_null.csv": ["sample", "source", "distance_um", "count"],
     "fibroblast_to_osteoblast_proximity.csv": ["section", "fibroblast_assigned_bins", "osteoblast_assigned_bins",
@@ -121,6 +127,43 @@ def test_pooled_and_depth_matched_scores_are_recomputed(run):
         assert not np.allclose(obs[f"pooled_score_{n}"], obs[f"score_{n}"])
         assert not np.allclose(obs[f"pooled_dm_score_{n}"], obs[f"pooled_score_{n}"])
     assert run["a"].raw is None
+
+
+SENSITIVITY_FIGURE_MODULES = ("positivity_figures", "proximity_figures", "uncoupling_figures", "compartments_figures",
+                              "clustering_figures")
+
+
+def test_sensitivity_analyses_ran(run):
+    import importlib
+    names = {f["name"] for f in run["figures"]}
+    for m in SENSITIVITY_FIGURE_MODULES:
+        mod = importlib.import_module(f"bone_sensitivity.{m}")
+        assert (run["out"] / mod.INPUTS[0]).is_file(), m
+        for name, _ in mod.FIGURES:
+            assert name in names, name
+    s = json.loads((run["out"] / "summary.json").read_text())
+    assert any(m["group"] == "Sensitivity analyses" for m in s["metrics"])
+    assert not any("sensitivity analysis" in w and "failed" in w for w in s["warnings"])
+    pb = pd.read_csv(run["out"] / "per_bin_signature_calls_16um.csv.gz", nrows=5)
+    assert {"positive_fraction_osteoclast_pooled_depthmatched_draws", "in_lesion"} <= set(pb.columns)
+
+
+def test_sensitivity_analyses_change_no_manuscript_output(run, tiny_joint):
+    """The same analysis with the sensitivity step off (tiny_joint) writes identical manuscript tables."""
+    skip = {"summary.json", "manifest.json", "config.json", "per_bin_signature_calls_16um.csv.gz"}
+    compared = 0
+    for path in sorted(tiny_joint["out"].glob("*.csv*")):
+        if path.name in skip or path.name.startswith("sensitivity_"):
+            continue
+        other = run["out"] / path.name
+        assert other.is_file(), path.name
+        pd.testing.assert_frame_equal(pd.read_csv(path), pd.read_csv(other), check_exact=False, rtol=1e-9,
+                                      obj=path.name)
+        compared += 1
+    assert compared > 15
+    off = pd.read_csv(tiny_joint["out"] / "per_bin_signature_calls_16um.csv.gz")
+    on = pd.read_csv(run["out"] / "per_bin_signature_calls_16um.csv.gz")
+    pd.testing.assert_frame_equal(off, on[off.columns])
 
 
 def test_figures_all_drawn(run):

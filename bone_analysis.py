@@ -4,8 +4,13 @@ bone_analysis.py
 ================
 Visium HD analysis pipeline: A549 intratibial lesion (right tibia, RL-1-5) against the
 contralateral control (left tibia, LL-2-1) of the same NSG mouse, both sections on one capture slide, one CytAssist run,
-Visium Mouse Transcriptome Probe Set v2.0 against mm10-2020-A. Human A549 transcripts are not captured: every transcript
-is murine.
+Visium Mouse Transcriptome Probe Set v2.0 against mm10-2020-A. Every feature is a mouse probe, but probes of conserved
+genes also capture the human A549 RNA, so the lesion is visible in the data.
+[FIX] This paragraph said "Human A549 transcripts are not captured: every transcript is murine". The probe set is mouse
+(all 19,059 features are ENSMUSG genes), but mouse probes for conserved genes cross-capture A549 RNA: Krt7 is detected
+in 2,523 RL-1-5 bins against 17 LL-2-1 bins, Krt18 in 552 against 13, and Tmsb10 and Itm2b track the lesion. The
+lesion is therefore visible inside the region of interest, and the tumor-bearing section's 'unresolved' Leiden domain
+is strongly enriched for it (bone_sensitivity/ marks it by pooled Krt7 + Krt18 UMIs).
 
 Reads the Space Ranger binned outputs and writes every table and number the manuscript reports from the transcriptome,
 plus the joint AnnData object the figure script draws from.
@@ -32,7 +37,7 @@ Steps of the original pipeline that are NOT used in the manuscript and are there
 Usage (from the project root, the folder that contains SR007144_LL-2-1/ and SR007144_RL-1-5/)
 -----
     python Manuscript/code/bone_analysis.py --root . --out Manuscript/code/results
-    # optional: --geneset-sensitivity (Methods, three gene sets; slow), --skip-moran (Supplementary Figure S2; slow),
+    # optional: --geneset-sensitivity (Methods, three gene sets), --skip-moran (Supplementary Figure S2; slow),
     #           --roi-mask SAMPLE=PATH.geojson (hand-drawn ROI; repeat per sample), --project-8um
     python bone_analysis.py --config my_config.json --out results    # [APP] any configuration (pipeline_config.py)
     python -m webapp                                                  # [APP] the web application
@@ -131,6 +136,18 @@ UBIQUITOUS = set(_DEFAULT["ubiquitous"])
 PALETTE = {"control": "#4C72B0", "tumor": "#C44E52", **{k: d["color"] for k, d in _DEFAULT["signatures"].items()}}
 
 DE_COLUMNS = ["group", "names", "scores", "logfoldchanges", "pvals", "pvals_adj"]
+# [FIX] Figure 4h table (compare_osteoclast_states): scanpy's logfoldchanges replaced by a fold change of mean CP10k
+COMPARTMENT_DE_COLUMNS = ["group", "names", "scores", "pvals", "pvals_adj", "log2fc_mean_cp10k", "pct_group",
+                          "pct_rest", "selection_gene"]
+COMPARTMENT_SUMMARY_COLUMNS = ["sample", "threshold", "threshold_is_zero", "pct_bins_above_threshold", "n_growth_plate",
+                               "n_tumor_associated", "n_non_growth_plate_control", "n_growth_plate_outside_roi",
+                               "n_tumor_associated_outside_roi", "median_umi_growth_plate",
+                               "median_umi_tumor_associated"]
+UNRESOLVED_COLUMNS = ["sample", "unresolved_bins", "all_bins", "percent", "unresolved_bins_roi", "all_bins_roi",
+                      "percent_roi"]
+GENESET_SENSITIVITY_COLUMNS = ["gene_set", "signature", "sample", "n_units_roi", "n_positive_native", "pct_native",
+                               "ci_lo", "ci_hi", "pct_depth_matched_mean", "pct_depth_matched_sd", "genes_used",
+                               "genes_missing"]
 _NULL_PROGRESS = pc.Progress()
 
 
@@ -396,7 +413,13 @@ def collapse_unresolved(a, screen, key="leiden", ubiq_frac=0.3, label="unresolve
     """
     [RUN] Merge domains whose top markers are ubiquitously expressed transcripts into 'unresolved' (Methods;
     Supplementary Figure S5: 50,273 bins, 33.1%). 0.3 is the natural break in this dataset (merged domains 0.3-0.6,
-    next value 0.1). The mechanism is not established, and 'unresolved' is not a tumor label.
+    next value 0.1). The mechanism is not established.
+    [FIX] The note ended "and 'unresolved' is not a tumor label". The label is defined without reference to the tumor,
+    but it is not tumor-free: the mouse probes cross-capture A549 RNA (module docstring), and in the tumor-bearing
+    section the unresolved domain is strongly enriched for the lesion (cross-captured Krt7 and Krt18; Tmsb10 and Itm2b
+    track the lesion). Its share also
+    differs between sections (this code on the SR007144 data: 18.3% of the control and 42.3% of the tumor-bearing bins,
+    33.3% pooled; leiden_signature_matrix reports it per section).
     """
     hits = screen.loc[screen["ubiquitous_fraction"] >= ubiq_frac, "domain"].astype(str).tolist() if len(screen) else []
     new = a.obs[key].astype(str)
@@ -573,12 +596,16 @@ def positivity_table(a, names=PRIMARY, roi_key=None, reference=None, samples=Non
     percentage over the reference section's); fold_tumor_over_control is kept, computed as before (tumor over control
     percentage, rounded to 2 decimals), when there are exactly two sections and one of them is the tumor section
     (tumor_samples; default: the non-reference one). A section without bins gives NaN instead of a division by zero.
+    [FIX] Both folds are computed from the exact rates n_positive / n_bins; only the stored folds are rounded
+    (fold_vs_reference 4 decimals, fold_tumor_over_control 2). They were ratios of pct_positive already rounded to 3
+    decimals, which moved small rates: on the SR007144 data the osteoclast fold_tumor_over_control was 169.36 instead of
+    171.30 (the Figure 4g caption, from exact counts), and the megakaryocyte fold_vs_reference was off by 26%.
     """
     from statsmodels.stats.proportion import proportion_confint
     obs = a.obs if roi_key is None else a.obs[_as_bool(a.obs[roi_key])]
     samples = list(samples) if samples else list(pd.unique(a.obs["sample"].astype(str)))
     smp = obs["sample"].astype(str)
-    rows = []
+    rows, exact = [], []
     for n in names:
         if f"pos_{n}" not in obs:
             continue
@@ -590,6 +617,7 @@ def positivity_table(a, names=PRIMARY, roi_key=None, reference=None, samples=Non
                 rate, lo, hi = 100 * x / tot, 100 * lo, 100 * hi
             else:
                 rate = lo = hi = np.nan
+            exact.append(rate)
             rows.append({"signature": n, "sample": s, "roi": roi_key or "whole_section", "n_positive": x, "n_bins": tot,
                          "pct_positive": round(rate, 3), "ci_lo": round(lo, 3), "ci_hi": round(hi, 3),
                          "mean_score": float(sub[f"score_{n}"].mean()) if tot else np.nan})
@@ -597,15 +625,15 @@ def positivity_table(a, names=PRIMARY, roi_key=None, reference=None, samples=Non
                                      "ci_hi", "mean_score"])
     if df.empty or not samples:
         return df
+    rate = pd.Series(exact, index=pd.MultiIndex.from_arrays([df["signature"], df["sample"]]), dtype=float)
     reference = reference if reference in samples else samples[0]
-    ref = df[df["sample"] == reference].set_index("signature")["pct_positive"].replace(0, np.nan)
-    df["fold_vs_reference"] = (df["pct_positive"] / df["signature"].map(ref)).round(4)
+    ref = rate.xs(reference, level=1).replace(0, np.nan)
+    df["fold_vs_reference"] = (rate.to_numpy() / df["signature"].map(ref).to_numpy(float)).round(4)
     tumor = [s for s in samples if s in tumor_samples] if tumor_samples is not None else \
         [s for s in samples if s != reference]
     if len(samples) == 2 and len(tumor) == 1:                                   # not quoted in the text
         control = next(s for s in samples if s != tumor[0])
-        pct = df.set_index(["signature", "sample"])["pct_positive"]             # every signature has a row per section
-        fold = (pct.xs(tumor[0], level="sample") / pct.xs(control, level="sample").replace(0, np.nan)).round(2)
+        fold = (rate.xs(tumor[0], level=1) / rate.xs(control, level=1).replace(0, np.nan)).round(2)
         df["fold_tumor_over_control"] = df["signature"].map(fold)
     return df
 
@@ -620,11 +648,14 @@ def depth_match_targets(a, mode="cap"):
     """
     [APP] Per-bin UMI targets of the depth matching (configuration scoring.depth_matching).
       cap       (manuscript) every bin above the median UMI per bin of the shallowest section is downsampled to that
-                median; bins below it keep their counts. Deeper sections therefore keep more bins at the target than the
-                shallowest one, a residual depth advantage (CHANGES.md).
+                median, in every section including the shallowest; bins below it keep their counts. Deeper sections
+                keep more bins at the target than the shallowest one, a residual depth advantage (CHANGES.md).
       quantile  the shallowest section keeps its counts; each bin of every other section is downsampled to the UMI count
                 at the same quantile of the shallowest section's per-bin distribution (never above its own total), so the
                 per-bin depth distributions match.
+    [FIX] Wording. cap lowers both sections (SR007144: the control ROI mean falls from 81.9 to 47.5 UMI per bin), and
+    the residual advantage of the deeper section is small (+4.8%). quantile matches whole-section distributions, which
+    leaves the tumor-bearing ROI about 15% shallower than the control ROI: conservative for tumor-enriched programs.
     Returns (targets per bin, median target, per-section medians).
     """
     target, med = depth_match_target(a)
@@ -691,7 +722,11 @@ def depth_matched(a, names=PRIMARY, n_reps=5, roi_key=None, sigs=SIG, mode="cap"
     independent per-bin subsampling (downsample_counts_matrix) and a light object instead of a full copy. The table
     gains n_positive_mean and n_bins, so figures label bars with counts instead of rebuilding them from rounded
     percentages, and the means are taken over unrounded percentages.
+    [FIX] The table also carries ci_lo, ci_hi: the Wilson 95% interval (percent) of round(n_positive_mean) positive bins
+    out of n_bins, a bin-level interval like the native table's. pct_positive_sd is the spread over the downsampling
+    replicates only; it says nothing about the sampling uncertainty of the rate.
     """
+    from statsmodels.stats.proportion import proportion_confint
     targets, target, _ = depth_match_targets(a, mode)
     print(f"[depth-match] {mode}: downsampling to {target} counts/bin")
     out = []
@@ -708,7 +743,11 @@ def depth_matched(a, names=PRIMARY, n_reps=5, roi_key=None, sigs=SIG, mode="cap"
     g = (df.groupby(["signature", "sample"], as_index=False, sort=False)
            .agg(pct_positive_mean=("pct_exact", "mean"), pct_positive_sd=("pct_exact", "std"),
                 n_positive_mean=("n_positive", "mean"), n_bins=("n_bins", "first"), mean_score=("mean_score", "mean")))
-    return g.round({"pct_positive_mean": 4, "pct_positive_sd": 4, "n_positive_mean": 2})
+    ci = [proportion_confint(int(round(k)), int(n), method="wilson") if n > 0 else (np.nan, np.nan)
+          for k, n in zip(g["n_positive_mean"], g["n_bins"])]
+    g["ci_lo"] = [100 * lo for lo, _ in ci]
+    g["ci_hi"] = [100 * hi for _, hi in ci]
+    return g.round({"pct_positive_mean": 4, "pct_positive_sd": 4, "n_positive_mean": 2, "ci_lo": 4, "ci_hi": 4})
 
 
 # ============================================================================
@@ -838,16 +877,28 @@ def program_composition(a, col, samples=None):
 COMPARTMENTS = ["negative", "growth_plate", "tumor_associated", "non_growth_plate_control"]
 
 
-def split_osteoclast_compartments(a, pct=90, signature="osteoclast", split_by="chondrocyte", tumor_conditions=("tumor",)):
+def split_osteoclast_compartments(a, pct=90, signature="osteoclast", split_by="chondrocyte",
+                                  tumor_conditions=("tumor",), progress=None):
     """
     [RUN] Osteoclast-positive bins split by chondrocyte score: above the 90th percentile of all bins = growth-plate
     (chondro-osseous junction) compartment, the rest = tumor-associated (Methods; Figure 4h).
     [FIX] Only sections whose condition is a tumor condition (compartments.tumor_conditions) hold tumor-associated bins.
     Non-growth-plate osteoclast bins of the contralateral control limb, which has no tumor, were labelled
     'tumor_associated' and pooled into the Figure 4h test; they are now 'non_growth_plate_control' and not tested.
+    [FIX] The percentile value is stored in a.uns["compartment_threshold"] (NaN when the score cannot be computed), and
+    a warning says when it is 0. The chondrocyte score is zero-inflated (44.5% of the SR007144 bins score exactly 0),
+    so its 90th percentile is 0 and 'above the 90th percentile' means a score above 0, which requires at least one UMI
+    of a chondrocyte gene (2.1% of bins), not the top 10% of bins.
     """
     split = a.obs[f"score_{split_by}"].to_numpy(dtype=float)
-    gp = split > np.nanpercentile(split, pct) if not np.isnan(split).all() else np.zeros(a.n_obs, dtype=bool)
+    thr = float(np.nanpercentile(split, pct)) if not np.isnan(split).all() else np.nan
+    gp = split > thr if np.isfinite(thr) else np.zeros(a.n_obs, dtype=bool)
+    a.uns["compartment_threshold"] = thr
+    if thr == 0:
+        _warn(progress, f"osteoclast compartments: the {pct:g}th percentile of the {split_by} score is 0 "
+                        f"({100 * float(np.mean(split == 0)):.1f}% of bins score exactly 0), so the growth-plate rule "
+                        f"is a {split_by} score above 0, i.e. at least one UMI of a {split_by} gene "
+                        f"({100 * float(np.mean(gp)):.1f}% of bins)")
     a.obs["growth_plate"] = gp
     oc = _as_bool(a.obs[f"pos_{signature}"])
     tumor = a.obs["condition"].astype(str).isin(list(tumor_conditions)).to_numpy()
@@ -859,13 +910,19 @@ def split_osteoclast_compartments(a, pct=90, signature="osteoclast", split_by="c
     return a
 
 
-def compare_osteoclast_states(a, sections="all", tumor_conditions=("tumor",), progress=None):
+def compare_osteoclast_states(a, sections="all", tumor_conditions=("tumor",), selection_genes=(), progress=None):
     """
     [SHAMIM, MODIFIED] step 10 (Wilcoxon rank-sum, BH-adjusted), applied to the two osteoclast compartments
     instead of Leiden clusters, on the full log-normalized matrix.
     [FIX] Each compartment needs at least two bins: with 0 or 1 bins rank_genes_groups raised or returned all-zero
     scores; the test is now skipped with a warning and an empty table.
     [APP] sections="tumor" takes both compartments from tumor sections only (no between-section depth difference).
+    [FIX] scanpy's logfoldchanges is dropped: it is log2 of the ratio of expm1(mean log-expression) with a 1e-9 floor,
+    so a gene undetected in one compartment got |values| of 19-31.6 (26.9% of the rows on the SR007144 data). In its
+    place: log2fc_mean_cp10k = log2((mean CP10k in the group + 1) / (mean CP10k in the other compartment + 1)), CP10k =
+    expm1(lognorm); pct_group and pct_rest, the percentage of bins detecting the gene in each; and selection_gene, True
+    for the genes that define the split (selection_genes: the split_by signature's scored genes), which are higher in
+    the growth-plate compartment by construction. Scores and P values are unchanged. Columns: COMPARTMENT_DE_COLUMNS.
     """
     comp = a.obs["oc_compartment"].astype(str)
     mask = comp.isin(["growth_plate", "tumor_associated"]).to_numpy()
@@ -875,13 +932,55 @@ def compare_osteoclast_states(a, sections="all", tumor_conditions=("tumor",), pr
     if n.get("growth_plate", 0) < 2 or n.get("tumor_associated", 0) < 2:
         _warn(progress, f"osteoclast compartments: growth-plate {int(n.get('growth_plate', 0))} and tumor-associated "
                         f"{int(n.get('tumor_associated', 0))} bins; at least two of each are needed, no test")
-        return pd.DataFrame(columns=DE_COLUMNS)
-    sub = ad.AnnData(X=a.layers["lognorm"][mask], var=pd.DataFrame(index=a.var_names.copy()),
-                     obs=pd.DataFrame({"oc_compartment": pd.Categorical(comp[mask].to_numpy(),
-                                                                        categories=["growth_plate", "tumor_associated"])},
+        return pd.DataFrame(columns=COMPARTMENT_DE_COLUMNS)
+    X = sp.csr_matrix(a.layers["lognorm"][mask])
+    labels = comp[mask].to_numpy()
+    order = ["growth_plate", "tumor_associated"]
+    sub = ad.AnnData(X=X, var=pd.DataFrame(index=a.var_names.copy()),
+                     obs=pd.DataFrame({"oc_compartment": pd.Categorical(labels, categories=order)},
                                       index=a.obs_names[mask]))
     sc.tl.rank_genes_groups(sub, groupby="oc_compartment", method="wilcoxon", use_raw=False)
-    return sc.get.rank_genes_groups_df(sub, group=None)
+    df = sc.get.rank_genes_groups_df(sub, group=None)
+    groups = [X[labels == g] for g in order]
+    mean_cp10k = np.vstack([np.asarray(Xg.astype(np.float64).expm1().mean(axis=0)).ravel() for Xg in groups])
+    pct = np.vstack([100 * np.asarray((Xg > 0).sum(axis=0)).ravel() / Xg.shape[0] for Xg in groups])
+    own = (df["group"].astype(str).to_numpy() == order[1]).astype(int)                # row of the group, 1 - own: rest
+    gi = sub.var_names.get_indexer(df["names"].astype(str))
+    df["log2fc_mean_cp10k"] = np.round(np.log2((mean_cp10k[own, gi] + 1) / (mean_cp10k[1 - own, gi] + 1)), 4)
+    df["pct_group"] = np.round(pct[own, gi], 3)
+    df["pct_rest"] = np.round(pct[1 - own, gi], 3)
+    df["selection_gene"] = df["names"].astype(str).isin(set(selection_genes)).to_numpy()
+    return df[COMPARTMENT_DE_COLUMNS].reset_index(drop=True)
+
+
+def compartment_summary(a, roi_key="in_marrow_roi", samples=None):
+    """
+    [FIX] Figure 4h compartments as computed (Figure4h_compartment_summary.csv): one row for all sections ("all"),
+    then one per section, with the threshold actually used (a.uns["compartment_threshold"], the joint percentile of the
+    split score; on the SR007144 data it is 0, so 'above the 90th percentile' means at least one UMI of a chondrocyte
+    gene), the percentage of bins above it, the bins of each compartment, how many of them lie outside the region of
+    interest (the compartments are not restricted to it; 39 of 116 growth-plate and 595 of 2,252 tumor-associated bins
+    on the SR007144 data), and the median UMI per bin of each compartment (growth-plate bins are about twice as deep).
+    """
+    thr = float(a.uns.get("compartment_threshold", np.nan))
+    comp = a.obs["oc_compartment"].astype(str).to_numpy()
+    gp = _as_bool(a.obs["growth_plate"]) if "growth_plate" in a.obs else np.zeros(a.n_obs, dtype=bool)
+    roi = _as_bool(a.obs[roi_key]) if roi_key in a.obs else np.ones(a.n_obs, dtype=bool)
+    umi = a.obs["total_counts"].to_numpy(dtype=float)
+    smp = a.obs["sample"].astype(str).to_numpy()
+    samples = list(samples) if samples else list(pd.unique(smp))
+    rows = []
+    for s, m in [("all", np.ones(a.n_obs, dtype=bool))] + [(s, smp == s) for s in samples]:
+        g, t = m & (comp == "growth_plate"), m & (comp == "tumor_associated")
+        rows.append({"sample": s, "threshold": thr, "threshold_is_zero": bool(thr == 0),
+                     "pct_bins_above_threshold": round(100 * float(gp[m].mean()), 3) if m.any() else np.nan,
+                     "n_growth_plate": int(g.sum()), "n_tumor_associated": int(t.sum()),
+                     "n_non_growth_plate_control": int((m & (comp == "non_growth_plate_control")).sum()),
+                     "n_growth_plate_outside_roi": int((g & ~roi).sum()),
+                     "n_tumor_associated_outside_roi": int((t & ~roi).sum()),
+                     "median_umi_growth_plate": float(np.median(umi[g])) if g.any() else np.nan,
+                     "median_umi_tumor_associated": float(np.median(umi[t])) if t.any() else np.nan})
+    return pd.DataFrame(rows, columns=COMPARTMENT_SUMMARY_COLUMNS)
 
 
 # ============================================================================
@@ -1109,7 +1208,6 @@ def _morans_i_builtin(sub, genes):
     from scipy import stats
     from scipy.spatial import Delaunay
     from sklearn.preprocessing import normalize
-    from statsmodels.stats.multitest import multipletests
     coords = np.asarray(sub.obsm["spatial"], dtype=float)
     n = coords.shape[0]
     indptr, indices = Delaunay(coords).vertex_neighbor_vertices
@@ -1126,11 +1224,20 @@ def _morans_i_builtin(sub, genes):
     p = np.where(z > 0, 1 - stats.norm.cdf(z), stats.norm.cdf(z))
     p[np.isnan(z)] = np.nan
     df = pd.DataFrame({"I": score, "pval_norm": p, "var_norm": v_norm}, index=pd.Index(genes))
-    ok = ~np.isnan(p)
-    df["pval_norm_fdr_bh"] = np.nan
-    if ok.any():
-        df.loc[ok, "pval_norm_fdr_bh"] = multipletests(p[ok], alpha=0.05, method="fdr_bh")[1]
+    df["pval_norm_fdr_bh"] = _bh_on_finite(p)
     return df.sort_values("I", ascending=False)
+
+
+def _bh_on_finite(p):
+    """[FIX] Benjamini-Hochberg adjusted P values over the defined P values only (NaN stays NaN). statsmodels'
+    multipletests returns NaN for every gene as soon as one P value is NaN."""
+    from statsmodels.stats.multitest import multipletests
+    p = np.asarray(p, dtype=float)
+    out = np.full(p.shape, np.nan)
+    ok = np.isfinite(p)
+    if ok.any():
+        out[ok] = multipletests(p[ok], alpha=0.05, method="fdr_bh")[1]
+    return out
 
 
 def morans_i(adata, n_svg=2000, n_consensus=200, samples=None, progress=None):
@@ -1144,6 +1251,9 @@ def morans_i(adata, n_svg=2000, n_consensus=200, samples=None, progress=None):
     [APP] squidpy is used when it is installed, otherwise _morans_i_builtin (same graph, statistic and p-values).
     [FIX] The highly variable genes are chosen on a light object holding only the log-normalized matrix; the whole
     joint object (four copies of the matrix) used to be copied for it.
+    [FIX] With squidpy, pval_norm_fdr_bh is recomputed over the defined P values only (_bh_on_finite). A gene with zero
+    variance in a section has a NaN P value, and squidpy passed it to multipletests, which made the adjusted P value NaN
+    for every gene of that section (all RL-1-5 genes on the SR007144 data: 12 HVGs are constant there).
     """
     try:
         import squidpy as sq
@@ -1170,6 +1280,8 @@ def morans_i(adata, n_svg=2000, n_consensus=200, samples=None, progress=None):
             # only Moran's I itself is reported, so no permutation P values (they do not change I)
             sq.gr.spatial_autocorr(sub, mode="moran", genes=genes, n_perms=None, n_jobs=1)
             res = sub.uns["moranI"]
+            if "pval_norm" in res:
+                res["pval_norm_fdr_bh"] = _bh_on_finite(res["pval_norm"].to_numpy())
         else:
             res = _morans_i_builtin(sub, genes)
         mdf = res.reset_index().rename(columns={"index": "gene"})
@@ -1189,12 +1301,16 @@ def morans_i(adata, n_svg=2000, n_consensus=200, samples=None, progress=None):
     return moran, cons.sort_values("mean_rank").reset_index()
 
 
-def leiden_signature_matrix(a, primary=PRIMARY, sigs=SIG, label_of=None, min_bins=20):
+def leiden_signature_matrix(a, primary=PRIMARY, sigs=SIG, label_of=None, min_bins=20, samples=None,
+                            roi_key="in_marrow_roi"):
     """
     [RUN] Supplementary Figure S5: mean signature score per Leiden domain, z-scored across domains. Each domain is
     named by the signature most enriched among its assigned bins relative to the whole dataset (at least 20 bins).
     [APP] Signature labels from the configuration; works without the tissue assignment (domains keep their numbers).
     [FIX] A signature whose mean score is identical in every domain gets NaN instead of a division by zero.
+    [FIX] The unresolved table (UNRESOLVED_COLUMNS) has a first row sample="all" (the pooled share, as before) and one
+    row per section, each also within the region of interest (roi_key; NaN without it). The pooled share hid the
+    difference between sections (SR007144: 33.3% pooled, 18.3% control and 42.3% tumor-bearing; ROI 18.6% and 47.8%).
     """
     def lbl(c):
         return label_of(c) if label_of else c.replace("_", " ").replace("neutrophil", "granulocyte")
@@ -1213,9 +1329,20 @@ def leiden_signature_matrix(a, primary=PRIMARY, sigs=SIG, label_of=None, min_bin
     M.index = [names[str(i)] for i in M.index]
     M.columns = [lbl(c.replace("score_", "")) for c in M.columns]
     un = ld == "unresolved"
-    return (M.reset_index().rename(columns={"index": "leiden_domain"}),
-            pd.DataFrame([{"unresolved_bins": int(un.sum()), "all_bins": int(len(ld)),
-                           "percent": round(100 * un.mean(), 1) if len(ld) else np.nan}]))
+    smp = a.obs["sample"].astype(str).to_numpy()
+    roi = _as_bool(a.obs[roi_key]) if roi_key in a.obs else None
+    samples = list(samples) if samples else list(pd.unique(smp))
+    rows = []
+    for s, m in [("all", np.ones(len(ld), dtype=bool))] + [(s, smp == s) for s in samples]:
+        r = {"sample": s, "unresolved_bins": int(un[m].sum()), "all_bins": int(m.sum()),
+             "percent": round(100 * un[m].mean(), 1) if m.any() else np.nan,
+             "unresolved_bins_roi": np.nan, "all_bins_roi": np.nan, "percent_roi": np.nan}
+        if roi is not None:
+            mr = m & roi
+            r.update(unresolved_bins_roi=int(un[mr].sum()), all_bins_roi=int(mr.sum()),
+                     percent_roi=round(100 * un[mr].mean(), 1) if mr.any() else np.nan)
+        rows.append(r)
+    return M.reset_index().rename(columns={"index": "leiden_domain"}), pd.DataFrame(rows, columns=UNRESOLVED_COLUMNS)
 
 
 def geneset_sensitivity(a, n_reps=5, variants=None, names=("osteoclast", "osteoblast"),
@@ -1225,7 +1352,12 @@ def geneset_sensitivity(a, n_reps=5, variants=None, names=("osteoclast", "osteob
     """
     [RUN] Methods: bone-lineage positivity recomputed under three gene sets with the calling rule held constant
     (canonical two-gene markers; the lists of the original study design; the scoring signatures of Table 1), at native
-    depth and after depth matching, within the ROI. Slow (about 30 runs of scoring and null thresholds).
+    depth and after depth matching, within the ROI (about 30 runs of scoring and null thresholds; 1-2 minutes).
+    Every listed gene of a variant is both scored and counted toward the two-gene rule (core = extended = the list, as
+    in the original code). The osteoclast list of the original study design equals the scored (extended) list of Table 1,
+    so its rows differ from the table1_signatures rows only in that Mmp9 and Nfatc1 also count toward the two-gene rule.
+    [FIX] Variant genes absent from the data are reported (warning; Bglap of the original osteoblast list is not in the
+    probe set), and every row names the genes used and missing (columns genes_used, genes_missing).
     [FIX] The depth-matched replicates are scored from their own downsampled matrices (they were scored from the native
     .raw, see score_all), with the downsampling and null sizes of the main analysis (native calls n_perm, depth-matched
     calls n_perm_resampled; all calls used 20 before), so the table1_signatures rows equal Figures 4g/6a. A variant that
@@ -1249,6 +1381,12 @@ def geneset_sensitivity(a, n_reps=5, variants=None, names=("osteoclast", "osteob
             if n in vs:
                 vs[n].update({"core": list(genes), "extended": list(genes)})
         vs = {k: vs[k] for k in names + comp if k in vs}
+        used = {n: [g for g in vs[n]["extended"] if g in a.var_names] if n in vs else [] for n in names}
+        missing = {n: [g for g in vs[n]["extended"] if g not in a.var_names] if n in vs else [] for n in names}
+        for n in names:
+            if missing[n]:
+                _warn(progress, f"gene-set sensitivity, {vname}: {n} genes absent from the data: "
+                                f"{', '.join(missing[n])}")
         b = _lognorm_object(a.layers["counts"], a, ["sample"], target_sum)
         b = call_positive(score_all(b, vs, ctrl_size, seed), names, sigs=vs, n_perm=n_perm, **kw)
         nat = {(n, s): int(b.obs[f"pos_{n}"].values[roi & (smp == s)].sum()) for n in names for s in samples}
@@ -1266,8 +1404,9 @@ def geneset_sensitivity(a, n_reps=5, variants=None, names=("osteoclast", "osteob
             rows.append({"gene_set": vname, "signature": n, "sample": s, "n_units_roi": N, "n_positive_native": k,
                          "pct_native": round(100 * k / N, 4) if N else np.nan, "ci_lo": round(100 * lo, 4),
                          "ci_hi": round(100 * hi, 4), "pct_depth_matched_mean": round(float(d.mean()), 4),
-                         "pct_depth_matched_sd": round(float(d.std(ddof=1)), 4) if n_reps > 1 else np.nan})
-    return pd.DataFrame(rows)
+                         "pct_depth_matched_sd": round(float(d.std(ddof=1)), 4) if n_reps > 1 else np.nan,
+                         "genes_used": ",".join(used[n]), "genes_missing": ",".join(missing[n])})
+    return pd.DataFrame(rows, columns=GENESET_SENSITIVITY_COLUMNS)
 
 
 def table1_signatures(signatures=None):
@@ -1314,6 +1453,15 @@ def per_bin_table(a, cfg=None):
     for n in (unc["b"], unc["a"]):
         if f"{prefix}pos_{n}" in o and prefix:
             pb[f"positive_{_slug(cfg, n)}{suffix}"] = _as_bool(o[f"{prefix}pos_{n}"])
+    # [APP] sensitivity analyses: share of depth-matching draws in which a bin is pooled_dm-positive (the column above
+    # is draw 0 only), and the cross-captured A549 lesion flag
+    for n in (unc["b"], unc["a"]):
+        if f"pooled_dm_pos_frac_{n}" in o:
+            col = f"positive_fraction_{_slug(cfg, n)}_pooled_depthmatched_draws"
+            pb[col] = o[f"pooled_dm_pos_frac_{n}"].to_numpy(float)
+    if "in_lesion" in o:
+        pb["lesion_umi_pooled"] = o["lesion_umi_pooled"].to_numpy(float)
+        pb["in_lesion"] = _as_bool(o["in_lesion"])
     return pb
 
 
@@ -1420,6 +1568,7 @@ def _steps(cfg):
         ("proximity", "Proximity tables", st["proximity"]),
         ("moran", "Moran's I (Supplementary Figure S2)", st["moran"]),
         ("sensitivity", "Gene-set sensitivity (Methods)", st["sensitivity"]),
+        ("sensitivity_analyses", "Sensitivity analyses (second review)", st.get("sensitivity_analyses", False)),
         ("tables", "Table 1 and per-bin calls", True),
         ("write_h5ad", f"Write joint_{B}.h5ad", st["write_h5ad"]),
         ("project_fine_bins", f"Project labels onto {Q} bins", st["project_fine_bins"]),
@@ -1618,10 +1767,19 @@ def _run(cfg, out, progress):
                                 f"{cp['split_by']}; no test")
             else:
                 a = split_osteoclast_compartments(a, cp["percentile"], cp["signature"], cp["split_by"],
-                                                  cp["tumor_conditions"])
-                W.csv(compare_osteoclast_states(a, cp["de_sections"], cp["tumor_conditions"], progress),
+                                                  cp["tumor_conditions"], progress)
+                W.csv(compare_osteoclast_states(a, cp["de_sections"], cp["tumor_conditions"],
+                                                cfg["signatures"][cp["split_by"]]["extended"], progress),
                       "Figure4h_osteoclast_compartment_DE.csv", "Osteoclast compartment DE",
-                      "Wilcoxon rank-sum, growth-plate vs tumor-associated osteoclast-positive bins (Figure 4h).")
+                      "Wilcoxon rank-sum, growth-plate vs tumor-associated osteoclast-positive bins (Figure 4h), "
+                      "with log2 fold change of mean CP10k, % of bins detecting each gene, and selection_gene (genes "
+                      "of the split signature, higher in the growth-plate compartment by construction).")
+                W.csv(compartment_summary(a, samples=samples), "Figure4h_compartment_summary.csv",
+                      "Osteoclast compartments as computed",
+                      f"Per section and overall: the {cp['split_by']} score threshold actually used (the "
+                      f"{cp['percentile']:g}th percentile of all bins; 0 means at least one UMI of a {cp['split_by']} "
+                      f"gene), % of bins above it, bins per compartment, compartment bins outside the region of "
+                      f"interest and median UMI per bin of each compartment (Figure 4h).")
             done.add("compartments")
 
         # ---- 9. deterministic tissue assignment (Figure 3) ------------------------ [RUN]
@@ -1648,10 +1806,13 @@ def _run(cfg, out, progress):
             tables["ari"] = float(ari["ARI"].median()) if len(ari) else None
             done.add("stability")
         if begin("domain_matrix", ("leiden",)):
-            M, un = leiden_signature_matrix(a, primary, cfg["signatures"], lambda c: pc.signature_label(cfg, c))
+            M, un = leiden_signature_matrix(a, primary, cfg["signatures"], lambda c: pc.signature_label(cfg, c),
+                                            samples=samples)
             W.csv(M, "FigureS5_domain_by_signature_zscores.csv", "Leiden domains by signature",
                   "Mean signature score per Leiden domain, z-scored across domains (Supplementary Figure S5).")
-            W.csv(un, "FigureS5_unresolved_bins.csv", "Unresolved bins", "Bins in the 'unresolved' domain.")
+            tables["unresolved"] = W.csv(un, "FigureS5_unresolved_bins.csv", "Unresolved bins",
+                                         "Bins in the 'unresolved' domain: all sections (first row, sample 'all'), "
+                                         "then each section, in all bins and in the region of interest.")
             done.add("domain_matrix")
 
         # ---- 11. spatial analyses -------------------------------------------------- [RUN]; Moran [SHAMIM, MODIFIED] step 13
@@ -1700,6 +1861,10 @@ def _run(cfg, out, progress):
                   "gene_set_sensitivity_three_gene_sets.csv", "Gene-set sensitivity",
                   "Bone-lineage positivity under three gene sets, native and depth-matched (Methods).")
             done.add("sensitivity")
+        # ---- 11b. sensitivity analyses of the second review (bone_sensitivity/) ---- [APP]
+        if begin("sensitivity_analyses", ("assignment",)):
+            tables["sens"] = _sensitivity_analyses(a, cfg, W, progress, done)
+            done.add("sensitivity_analyses")
 
         # ---- 12. Table 1, per-bin table ------------------------------------------- [RUN]
         begin("tables")
@@ -1734,6 +1899,105 @@ def _run(cfg, out, progress):
         return a
     finally:
         W.write()
+
+
+def _sensitivity_analyses(a, cfg, W, progress, done):
+    """[APP] The sensitivity analyses of the second review (bone_sensitivity/; CHANGES.md): first the cross-captured A549
+    lesion flag (obs lesion_umi_pooled, in_lesion), then each module whose inputs exist. A module that fails becomes a
+    warning; the other modules and every manuscript output are unaffected. Returns {file name: table}."""
+    from bone_sensitivity import clustering, common, compartments, positivity, proximity, uncoupling
+    les = common.settings(cfg, "lesion")
+    pooled, flag, found = common.lesion_signal(a, les["genes"], les["pool_k"], les["min_pooled_umi"])
+    a.obs["lesion_umi_pooled"] = pooled                # all 0 / False without the genes (the modules then need not
+    a.obs["in_lesion"] = flag                          # recompute and re-warn)
+    if not found:
+        _warn(progress, f"sensitivity analyses: none of the lesion genes ({', '.join(les['genes'])}) is in the data, "
+                        f"so no bin is flagged as lesion")
+    modules = [("positivity", positivity, ("positivity",)), ("proximity", proximity, ()),
+               ("uncoupling", uncoupling, ()), ("compartments", compartments, ()),
+               ("clustering", clustering, ("leiden", "domain_matrix"))]
+    written = {}
+    for name, module, needs in modules:
+        missing = [n for n in needs if n not in done]
+        if missing:
+            _warn(progress, f"sensitivity analysis {name} skipped: needs the step(s) {', '.join(missing)}")
+            continue
+        print(f"[sensitivity] {name}")
+        try:
+            outputs = module.run(a, cfg, progress)
+        except Exception as exc:                       # an extra analysis must not stop the manuscript outputs
+            _warn(progress, f"sensitivity analysis {name} failed: {type(exc).__name__}: {exc}")
+            print(traceback.format_exc())
+            continue
+        for o in outputs:
+            written[o.file] = W.csv(o.df, o.file, o.title, o.description)
+    return written
+
+
+def _sensitivity_metrics(cfg, sens, add):
+    """[APP] summary.json entries of the sensitivity analyses (group 'Sensitivity analyses')."""
+    G = "Sensitivity analyses"
+    sl = {s["id"]: s.get("label") or s["id"] for s in cfg["samples"]}
+    lbl = lambda n: pc.signature_label(cfg, n)                                   # noqa: E731
+    t = sens.get("sensitivity_Figure4i_summary.csv")
+    if t is not None and len(t):
+        calls = cfg["uncoupling"]["calls"]
+        for r in t[t["call_set"] == calls].to_dict("records"):
+            if _num(r.get("ratio_mean")) is None:
+                continue
+            detail = (f"{calls} calls; range {_num(r['ratio_min'], 3)}–{_num(r['ratio_max'], 3)} over "
+                      f"{r['n_draws']} draw(s)")
+            if _num(r.get("ratio_of_ratios_mean")) is not None and r["sample"] != cfg["reference_sample"]:
+                detail += (f"; ratio of ratios vs reference {_num(r['ratio_of_ratios_mean'], 3)} "
+                           f"({_num(r['ratio_of_ratios_min'], 3)}–{_num(r['ratio_of_ratios_max'], 3)})")
+            add(G, f"Figure 4i, {sl.get(r['sample'], r['sample'])}: observed / null, {r['null_model']}",
+                r["ratio_mean"], "", detail)
+    t = sens.get("sensitivity_proximity.csv")
+    if t is not None and len(t):
+        for r in t[t["status"] == "estimable"].to_dict("records"):
+            ac = r.get("assignment_column")
+            col = f" ({ac})" if isinstance(ac, str) and ac else ""
+            add(G, f"{sl.get(r['sample'], r['sample'])}: {lbl(r['source'])} within {float(r['radius_um']):g} µm of "
+                   f"{lbl(r['target'])}{col}, minus depth-matched expectation", r["diff_pp"], "pp",
+                f"observed {_num(r['pct_source_within'], 1)}% vs depth-matched "
+                f"{_num(r['expected_depth_matched_pct'], 1)}% (95% block CI of the difference "
+                f"{_num(r['diff_ci_lo'], 1)} to {_num(r['diff_ci_hi'], 1)}); non-target baseline "
+                f"{_num(r['pct_nontarget_within'], 1)}%, all ROI bins {_num(r['pct_all_within'], 1)}%")
+    t = sens.get("sensitivity_positivity_folds.csv")
+    if t is not None and len(t):
+        shown = [s for p in cfg["figures"]["positivity_panels"] for s in p.get("signatures", [])]
+        for (sig, smp), g in t[t["signature"].isin(shown)].groupby(["signature", "sample"], sort=False):
+            ms = g[g["manuscript"].astype(str).str.lower().isin(["true", "1"]) & (g["depth"] == "native")]
+            f = pd.to_numeric(g["fold"], errors="coerce")
+            if ms.empty or not np.isfinite(f).any():
+                continue
+            m = ms.iloc[0]
+            lo, hi = _num(m.get("block_fold_ci_lo"), 2), _num(m.get("block_fold_ci_hi"), 2)
+            ci = (f"; spatial block-bootstrap 95% CI {lo if lo is not None else 'n/a'}–"
+                  f"{hi if hi is not None else 'unbounded'}") if lo is not None or hi is not None else ""
+            add(G, f"{lbl(sig)}: {sl.get(smp, smp)} / reference fold, native depth", m["fold"], "×",
+                f"range {_num(f.min(), 2)}–{_num(f.max(), 2)} over {int(np.isfinite(f).sum())} region, rule and "
+                f"depth-matching variants{ci}")
+    t = sens.get("sensitivity_Figure4h_diagnostics.csv")
+    if t is not None and len(t):
+        r = t[t["sample"].astype(str) == "all"]
+        if len(r):
+            r = r.iloc[0]
+            add(G, "Figure 4h: growth-plate threshold of the split score", r["threshold"], "",
+                f"{_num(r['pct_bins_above_threshold'], 2)}% of bins above it"
+                + ("; the threshold is 0, so the rule is 'at least one UMI of a split gene'"
+                   if str(r["threshold_is_zero"]).lower() in ("true", "1") else ""))
+    t = sens.get("sensitivity_Figure4h_variants.csv")
+    if t is not None and len(t):
+        for r in t[t["status"].astype(str) != "not configured"].to_dict("records"):
+            add(G, f"Figure 4h, {r['variant']}: genes significant (growth-plate / tumor-associated)",
+                r.get("n_significant_growth_plate"), "", f"{r['status']}; {r.get('n_group')} vs {r.get('n_rest')} "
+                f"{r.get('units')}; tumor-associated significant: {r.get('n_significant_tumor_associated')}")
+    t = sens.get("sensitivity_leiden_harmony.csv")
+    if t is not None and len(t):
+        for r in t[t["variant"] == "no_harmony"].to_dict("records"):
+            add(G, "Leiden without Harmony: adjusted Rand index vs the Harmony partition", r["ari_vs_harmony"], "",
+                f"{r['n_clusters']} raw clusters; same-section kNN edges {_num(r['same_section_edge_fraction'], 3)}")
 
 
 def _json_default(x):
@@ -1814,6 +2078,12 @@ def _summary(cfg, a, loaded, tables, progress):
                 f"against {r.get(base)}% of all ROI bins")
     if "unresolved_pct" in tables:
         add("Leiden domains", "Bins in unresolved domains", tables["unresolved_pct"], "%")
+        for r in tables.get("unresolved", pd.DataFrame(columns=["sample"])).to_dict("records"):
+            if r["sample"] != "all":
+                roi = _num(r["percent_roi"], 1)
+                add("Leiden domains", f"{sl.get(r['sample'], r['sample'])}: bins in unresolved domains", r["percent"],
+                    "%", f"{int(r['unresolved_bins']):,} of {int(r['all_bins']):,} bins"
+                         + (f"; region of interest {roi}%" if roi is not None else ""))
         add("Leiden domains", "Domains", obs["leiden"].nunique())
     if tables.get("ari") is not None:
         add("Leiden domains", "Median adjusted Rand index across seeds", tables["ari"])
@@ -1822,6 +2092,11 @@ def _summary(cfg, a, loaded, tables, progress):
         for r in rec[rec["fold_dm"].notna()].itertuples():
             add("Host receptor panel", f"{r.gene} ({r.role}): {sl.get(r.sample, r.sample)} / reference", r.fold_dm,
                 "×", f"{_num(r.pct_detected_dm, 3)}% of ROI bins detecting after depth matching")
+    if tables.get("sens"):
+        try:
+            _sensitivity_metrics(cfg, tables["sens"], add)
+        except Exception as exc:                       # a summary line must not lose the run
+            _warn(progress, f"summary of the sensitivity analyses incomplete: {type(exc).__name__}: {exc}")
     return {"version": 1, "bin_size": cfg["bin_size"], "reference_sample": cfg["reference_sample"],
             "depth_match_target_umi": int(target), "samples": samples, "metrics": metrics,
             "warnings": list(progress.warnings), "skipped": list(progress.skipped), "timings": list(progress.timings),
@@ -1848,7 +2123,7 @@ if __name__ == "__main__":
                     help="hand-drawn ROI as SAMPLE=PATH (.geojson on tissue_hires_image.png); repeat per sample")
     ap.add_argument("--mask-frame", default=None, choices=["hires", "fullres", "lowres"])
     ap.add_argument("--skip-moran", action="store_true", help="skip Supplementary Figure S2 (slow)")
-    ap.add_argument("--geneset-sensitivity", action="store_true", help="run the three-gene-set check of Methods (slow)")
+    ap.add_argument("--geneset-sensitivity", action="store_true", help="run the three-gene-set check of Methods")
     ap.add_argument("--project-8um", action="store_true", help="write the 16 um labels projected onto 8 um bins")
     ap.add_argument("--events", action="store_true", help="also print machine-readable @@EVENT progress lines")
     args = ap.parse_args()

@@ -120,13 +120,16 @@ def test_positivity_table_works_for_any_sample_ids_and_empty_sections():
     assert "fold_tumor_over_control" not in three
 
 
-def test_fold_tumor_over_control_follows_the_conditions_and_the_original_formula():
+def test_fold_tumor_over_control_follows_the_conditions_and_the_exact_counts():
     a = ba.call_positive(ba.score_all(_toy(samples=("C", "T")), SIGS), ["alpha"], SIGS, min_core=0, n_perm=3,
                          n_sub=300)
     t = ba.positivity_table(a, ["alpha"], reference="T", samples=["C", "T"], tumor_samples=["T"])
-    w = t.set_index("sample")["pct_positive"]
-    expected = round(w["T"] / w["C"], 2) if w["C"] else np.nan
+    w = t.set_index("sample")
+    rate = w["n_positive"] / w["n_bins"]                                         # exact, not the rounded pct_positive
+    expected = round(rate["T"] / rate["C"], 2) if rate["C"] else np.nan
     assert t["fold_tumor_over_control"].iloc[0] == pytest.approx(expected, nan_ok=True)   # tumor / control, not ref
+    expected_ref = round(rate["C"] / rate["T"], 4) if rate["T"] else np.nan     # reference without positives: NaN
+    assert w.loc["C", "fold_vs_reference"] == pytest.approx(expected_ref, nan_ok=True)
     assert "fold_tumor_over_control" not in ba.positivity_table(a, ["alpha"], samples=["C", "T"], tumor_samples=[])
 
 
@@ -230,7 +233,7 @@ def test_compartment_test_needs_two_bins_per_group():
     a.obs.iloc[0, a.obs.columns.get_loc("oc_compartment")] = "growth_plate"
     progress = pc.Progress()
     de = ba.compare_osteoclast_states(a, progress=progress)
-    assert de.empty and list(de.columns) == ba.DE_COLUMNS and progress.warnings
+    assert de.empty and list(de.columns) == ba.COMPARTMENT_DE_COLUMNS and progress.warnings
 
 
 # ---------------------------------------------------------------------------------------------- receptor panel

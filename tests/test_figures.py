@@ -147,18 +147,36 @@ def make_results(out: Path, cfg: dict, seed: int = 0, shapes=SHAPES) -> Path:
         if r.sample == ids[-1] and r.signature == "osteoblast":
             mean = 0.0004                                  # below the axis floor, with an SD reaching above it
         single = r.sample == ids[0]                        # a single depth-matching replicate: SD undefined
+        k = mean / 100 * r.n_bins
+        lo, hi = _wilson_pct(round(k), r.n_bins)
         rows.append({"signature": r.signature, "sample": r.sample, "pct_positive_mean": mean,
                      "pct_positive_sd": np.nan if single else 0.2 * mean + 0.002,
-                     "n_positive_mean": mean / 100 * r.n_bins, "n_bins": r.n_bins, "mean_score": r.mean_score})
+                     "n_positive_mean": k, "n_bins": r.n_bins, "mean_score": r.mean_score,
+                     "ci_lo": round(lo, 4), "ci_hi": round(hi, 4)})
     pd.DataFrame(rows).to_csv(out / "Figure4g_6a_positivity_depth_matched.csv", index=False)
 
-    # ---- Figure 4h ------------------------------------------------------------------------------------------------
+    # ---- Figure 4h (Acan and Comp: genes of the split signature) -------------------------------------------------
     p_ta = [1e-15, 1e-12, 3e-9, 2e-7, 4e-6, 1e-4, 2e-3, .01, .03, .2, np.nan, .6]
     p_gp = [1e-11, 5e-9, 1e-6, 3e-5, 2e-3, .02, .04, .07, .3, .5, .8, .9]
     pd.DataFrame({"group": ["tumor_associated"] * 12 + ["growth_plate"] * 12, "names": GENES_TA + GENES_GP,
-                  "scores": np.r_[np.linspace(26, 1, 12), np.linspace(19, .5, 12)],
-                  "logfoldchanges": rng.normal(1.5, .5, 24), "pvals": np.r_[p_ta, p_gp],
-                  "pvals_adj": np.r_[p_ta, p_gp]}).to_csv(out / DE_CSV, index=False)
+                  "scores": np.r_[np.linspace(26, 1, 12), np.linspace(19, .5, 12)], "pvals": np.r_[p_ta, p_gp],
+                  "pvals_adj": np.r_[p_ta, p_gp], "log2fc_mean_cp10k": rng.normal(1.5, .5, 24),
+                  "pct_group": rng.uniform(5, 60, 24), "pct_rest": rng.uniform(0, 20, 24),
+                  "selection_gene": [g in ("Acan", "Comp") for g in GENES_TA + GENES_GP]}).to_csv(out / DE_CSV,
+                                                                                                 index=False)
+    tumor_ids = [s["id"] for s in smp if s.get("condition") in cfg["compartments"]["tumor_conditions"]]
+    rows = [{"sample": "all", "n_growth_plate": 116, "n_tumor_associated": 2252, "n_non_growth_plate_control": 31,
+             "n_growth_plate_outside_roi": 39, "n_tumor_associated_outside_roi": 595,
+             "median_umi_growth_plate": 751.5, "median_umi_tumor_associated": 349.0}]
+    for s in smp:
+        tum = s["id"] in tumor_ids and s["id"] == tumor_ids[0]
+        rows.append({"sample": s["id"], "n_growth_plate": 116 * tum, "n_tumor_associated": 2252 * tum,
+                     "n_non_growth_plate_control": 0 if s["id"] in tumor_ids else 31,
+                     "n_growth_plate_outside_roi": 39 * tum, "n_tumor_associated_outside_roi": 595 * tum,
+                     "median_umi_growth_plate": 751.5 if tum else np.nan,
+                     "median_umi_tumor_associated": 349.0 if tum else np.nan})
+    pd.DataFrame(rows).assign(threshold=0.0, threshold_is_zero=True, pct_bins_above_threshold=2.1).to_csv(
+        out / "Figure4h_compartment_summary.csv", index=False)
 
     # ---- Figure 4i ------------------------------------------------------------------------------------------------
     summ, dist = [], []
@@ -249,8 +267,13 @@ def make_results(out: Path, cfg: dict, seed: int = 0, shapes=SHAPES) -> Path:
     S5 = pd.DataFrame(z, columns=labels)
     S5.insert(0, "leiden_domain", domains)
     S5.to_csv(out / "FigureS5_domain_by_signature_zscores.csv", index=False)
-    pd.DataFrame([{"unresolved_bins": 1234, "all_bins": len(pb), "percent": round(100 * 1234 / len(pb), 1)}]).to_csv(
-        out / "FigureS5_unresolved_bins.csv", index=False)
+    rows = [{"sample": "all", "unresolved_bins": 1234, "all_bins": len(pb), "percent": round(100 * 1234 / len(pb), 1)}]
+    for i, s in enumerate(smp):
+        n = int((pb["sample_id"] == s["id"]).sum())
+        rows.append({"sample": s["id"], "unresolved_bins": n // (5 - i), "all_bins": n,
+                     "percent": round(100 / (5 - i), 1), "unresolved_bins_roi": n_roi[s["id"]] // (4 - i),
+                     "all_bins_roi": n_roi[s["id"]], "percent_roi": round(100 / (4 - i), 1)})
+    pd.DataFrame(rows).to_csv(out / "FigureS5_unresolved_bins.csv", index=False)
 
     (out / "summary.json").write_text(json.dumps({
         "version": 1, "bin_size": cfg["bin_size"], "reference_sample": ref, "depth_match_target_umi": 23,
@@ -321,7 +344,8 @@ def _check_run(folder, cfg, progress, entries):
         assert e["title"] and len(e["caption"]) > 80 and e["group"]
     assert progress.reported == bf.planned_steps(cfg)
     assert progress.warnings == []
-    assert progress.skipped == []
+    # the synthetic results have no sensitivity tables (tests/test_sensitivity_*.py and the end-to-end test draw them)
+    assert [s for s in progress.skipped if not s["step"].startswith("Draw Sensitivity")] == []
 
 
 @pytest.mark.parametrize("make_cfg", [pc.default_config, one_sample_config, three_sample_config],
@@ -345,6 +369,9 @@ def test_make_figures_draws_every_figure(tmp_path, make_cfg):
     captions = {e["name"]: e["caption"] for e in entries}
     assert "Csf1" in captions["Figure6b_receptor_panel"]               # panel gene outside the probe set
     assert "megakaryocyte" in captions["Figure6a_myeloid_positivity"]   # panel signature without calls
+    assert "Acan†" not in captions["Figure4h_osteoclast_compartment_DE"] and "†: genes of the chondrocyte" in \
+        captions["Figure4h_osteoclast_compartment_DE"]                  # selection genes marked
+    assert "Unresolved share per section" in captions["FigureS5_leiden_domain_heatmap"]
     if len(cfg["samples"]) > 1:
         assert "not estimable" in captions["Figure4i_osteoblast_osteoclast_distance"]
     if len(cfg["samples"]) == 1:
@@ -373,7 +400,7 @@ def test_absent_and_empty_inputs_are_skipped(tmp_path):
     entries = bf.make_figures(folder, cfg, progress)
     assert progress.reported == bf.planned_steps(cfg)
     assert progress.warnings == []
-    reasons = {s["step"]: s["reason"] for s in progress.skipped}
+    reasons = {s["step"]: s["reason"] for s in progress.skipped if not s["step"].startswith("Draw Sensitivity")}
 
     def reason(fragment):
         return next(r for label, r in reasons.items() if fragment in label)

@@ -40,6 +40,20 @@ def tiny_config(tiny_demo):
 
 
 @pytest.fixture(scope="session")
+def tiny_joint(tmp_path_factory, tiny_demo):
+    """{"a", "cfg", "out"}: the joint AnnData of the whole analysis of the tiny demo sections (cheap settings, no
+    sensitivity analyses, no figures), run once per session. Tests must not modify `a` in place: copy it first."""
+    import bone_analysis as ba
+    samples = tiny_demo["samples"]
+    cfg = pc.merge_with_defaults({**CHEAP, "data_root": str(tiny_demo["root"]), "samples": samples,
+                                  "reference_sample": samples[0]["id"],
+                                  "steps": {**CHEAP["steps"], "project_fine_bins": False, "sensitivity_analyses": False}})
+    out = tmp_path_factory.mktemp("tiny_joint")
+    a = ba.run_analysis_from_config(cfg, out, pc.Progress())
+    return {"a": a, "cfg": pc.load_config(out / "config.json"), "out": out}
+
+
+@pytest.fixture(scope="session")
 def original_ba():
     """The untouched manuscript version of bone_analysis.py (_original/), imported under another name."""
     spec = importlib.util.spec_from_file_location("original_bone_analysis", ROOT / "_original" / "bone_analysis.py")

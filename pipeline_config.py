@@ -186,14 +186,18 @@ DEFAULT_CONFIG = {
     "scoring": {
         "ctrl_size": 50, "null_percentile": 95.0, "n_perm": 50, "n_perm_resampled": 20, "null_n_sub": 20000,
         "min_core": 2, "n_depth_reps": 5, "pool_k": 8,
-        # cap (manuscript): bins above the shallowest section's median UMI are downsampled to it, bins below are kept;
-        # quantile: every other section is downsampled bin by bin to the shallowest section's depth distribution.
+        # cap (manuscript): bins above the shallowest section's median UMI are downsampled to it in every section,
+        # the shallowest included; bins below are kept (small residual advantage of the deeper section, +4.8% on the
+        # manuscript data). quantile: every other section is downsampled bin by bin to the shallowest section's
+        # whole-section depth distribution (on the manuscript data the tumor ROI then ends ~15% shallower).
         "depth_matching": "cap",
     },
     "roi": {
         # Transcriptional region of interest: a bin is excluded when its score for any of these signatures is above
         # that signature's `exclude_percentile` over all bins of all sections (a listed signature that has a positivity
-        # call, i.e. is in `primary`, excludes its positive bins instead, as in the original code).
+        # call, i.e. is in `primary`, excludes its positive bins instead, as in the original code). For sparse
+        # signatures the percentile can be 0: as little as one UMI of a listed gene then excludes a bin (nerve and
+        # smooth muscle on the manuscript data).
         "exclude": ["skeletal_muscle", "nerve", "smooth_muscle"], "exclude_percentile": 90.0,
         # Hand-drawn region of interest (GeoJSON polygons). masks maps sample id -> GeoJSON path; mask_frame is the
         # image the polygons were drawn on (hires = spatial/tissue_hires_image.png).
@@ -202,14 +206,17 @@ DEFAULT_CONFIG = {
     # Osteoclast-positive bins above the split_by percentile are the growth-plate compartment; the others are the
     # tumor-associated compartment in sections whose condition is listed in tumor_conditions (elsewhere they are
     # "non_growth_plate_control" and not tested). de_sections: all = growth-plate bins of every section against the
-    # tumor-associated bins; tumor = both compartments from tumor sections only.
+    # tumor-associated bins; tumor = both compartments from tumor sections only (the same test on the manuscript data:
+    # every growth-plate bin is tumor-bearing). The chondrocyte score is zero-inflated: its 90th percentile is 0, so the
+    # growth-plate rule is in effect "at least one UMI of a chondrocyte gene" (Figure4h_compartment_summary.csv).
     "compartments": {"signature": "osteoclast", "split_by": "chondrocyte", "percentile": 90.0,
                      "tumor_conditions": ["tumor"], "de_sections": "all"},
     "uncoupling": {"a": "osteoblast", "b": "osteoclast", "calls": "pooled_dm", "n_perm": 199, "min_pos": 10},
     "proximity": {
         "radius_um": 50.0,
         # false (manuscript): a bin that is itself in the target set is its own nearest target (0 um);
-        # true: such a bin is measured to the nearest other target bin. Co-positive bins are counted either way.
+        # true: such a bin is measured to the nearest other target bin. Co-positive bins are counted either way. The
+        # baseline (all ROI bins) includes the target bins under both settings.
         "exclude_self": False,
         "pairs": [
             {"from": "fibroblast", "to": "osteoblast", "mode": "assignment"},
@@ -227,6 +234,30 @@ DEFAULT_CONFIG = {
                 "osteoblast": ["Runx2", "Sp7", "Alpl", "Col1a1", "Col1a2", "Spp1", "Bglap"]},
             "table1_signatures": {},
         },
+    },
+    # Sensitivity analyses of the second review (2026-11-02, bone_sensitivity/). They add tables and figures next to
+    # the manuscript outputs and change none of them.
+    "sensitivity_analyses": {
+        # spatial blocks (um) of the block-bootstrap intervals, and bootstrap resamples
+        "block_um": 160.0, "n_boot": 500,
+        # A549 lesion: bins whose own and k nearest bins' UMIs of these cross-captured human-tumor genes sum to at least
+        # min_pooled_umi
+        "lesion": {"genes": ["Krt7", "Krt18"], "pool_k": 8, "min_pooled_umi": 2},
+        # Figure 4i under other null models, call sets and depth-matching draws
+        "uncoupling": {"n_draws": 5, "n_perm": 199, "call_sets": ["pooled_dm", "pooled", "native"],
+                       "null_models": ["csr_both", "fixed_b", "fixed_a", "habitat_fixed_b", "random_labels"],
+                       "habitat_classes": ["bone lineage"]},
+        # proximity tables against non-target and depth-matched baselines
+        "proximity": {"n_strata": 10, "block_um": 200.0},
+        # positivity under other regions of interest, calling rules and depth-matching schemes
+        "positivity": {"roi_variants": ["manuscript", "call_rule_exclusion", "assignment_exclusion", "no_lesion"],
+                       "rule_variants": ["manuscript", "min_core_1", "min_core_3", "no_competitor_veto"],
+                       "depth_schemes": ["cap", "quantile", "quantile_roi"]},
+        # Figure 4h under other compartment definitions and tests
+        "compartments": {"anatomical_distance_um": 100.0, "min_region_bins": 50, "n_depth_reps": 5,
+                         "pseudobulk_block_um": 128.0, "growth_plate_masks": {}},
+        # Leiden domains per section, domain annotation, and the clustering without Harmony
+        "clustering": {"harmony_check": True, "marker_padj": 0.05},
     },
 
     # ---- gene sets --------------------------------------------------------------------------------------------
@@ -273,7 +304,8 @@ DEFAULT_CONFIG = {
         "uncoupling": True,          # Figure 4i
         "proximity": True,           # "within 50 um" tables
         "moran": True,               # Supplementary Figure S2 (slow)
-        "sensitivity": False,        # three gene sets (Methods; slow)
+        "sensitivity": False,        # three gene sets (Methods)
+        "sensitivity_analyses": True,  # second-review sensitivity analyses (bone_sensitivity/)
         "project_fine_bins": False,  # project labels onto `qc_bin_size` bins
         "write_h5ad": True,          # joint_<bin>.h5ad
         "figures": True,             # bone_figures.make_figures after the analysis
@@ -301,7 +333,8 @@ DEFAULT_CONFIG = {
 # Keys whose value replaces the default wholesale instead of being merged key by key (so entries can be deleted).
 _REPLACE = {"samples", "signatures", "classes", "primary", "programs", "receptor_panel", "adipocyte_genes",
             "ubiquitous", "masks", "pairs", "variants", "positivity_panels", "receptor_genes",
-            "composition_signatures", "exclude", "stability_seeds", "sweep_thresholds", "tumor_conditions"}
+            "composition_signatures", "exclude", "stability_seeds", "sweep_thresholds", "tumor_conditions",
+            "growth_plate_masks"}
 
 # ============================================================================
 # PARAMETER SCHEMA (drives the "Parameters" form of the web application)
@@ -369,19 +402,26 @@ PARAM_SCHEMA = [
         {"key": "pool_k", "label": "Spatial neighbors pooled per bin (Figure 3)", "type": "int", "min": 0,
          "max": 48, "help": "Counts of each bin and its k nearest bins are summed before scoring."},
         {"key": "depth_matching", "label": "Depth matching", "type": "select", "options": ["cap", "quantile"],
-         "help": "cap (manuscript): bins above the shallowest section's median UMI per bin are downsampled to it, "
-                 "bins below are kept, so deeper sections keep more bins at that depth. quantile: each bin of the "
-                 "other sections is downsampled to the shallowest section's depth at the same quantile, so the "
-                 "per-bin depth distributions match."},
+         "help": "cap (manuscript): every bin above the shallowest section's median UMI per bin is downsampled to it, "
+                 "in every section including the shallowest one, and bins below it are kept; this lowers both "
+                 "sections (manuscript data: the control ROI mean falls from 81.9 to 47.5 UMI per bin) and leaves "
+                 "the deeper section a small residual advantage (+4.8%). quantile: the shallowest section keeps its "
+                 "counts and each bin of the other sections is downsampled to the shallowest section's depth at the "
+                 "same quantile, matching whole-section distributions; on the manuscript data this leaves the tumor "
+                 "ROI about 15% shallower than the control ROI, so it is conservative for tumor-enriched programs."},
     ]},
     {"key": "roi", "title": "Region of interest", "description": "Marrow and bone region of interest. The "
      "transcriptional part excludes bins scoring high for the listed signatures; a hand-drawn region (ROI tab) "
      "can be intersected with it.", "fields": [
         {"key": "exclude", "label": "Signatures that exclude a bin", "type": "signature_list",
          "help": "A bin scoring above the exclusion percentile for any of these is outside the region. A signature with "
-                 "a positivity call excludes its positive bins instead."},
+                 "a positivity call excludes its positive bins instead. For a sparse signature the percentile can be "
+                 "0, and then as little as one UMI of one of its genes excludes a bin (nerve and smooth muscle on the "
+                 "manuscript data)."},
         {"key": "exclude_percentile", "label": "Exclusion percentile", "type": "float", "min": 0, "max": 100,
-         "step": 0.5},
+         "step": 0.5, "help": "Percentile of each exclusion signature's score over all bins of all sections. For "
+                              "sparse signatures it can be 0, so any bin with a score above 0 (as little as one UMI "
+                              "of one listed gene) is excluded."},
         {"key": "use_drawn", "label": "Intersect with the hand-drawn region", "type": "bool",
          "help": "Sections without a drawn region are not restricted further."},
         {"key": "mask_frame", "label": "Image the regions were drawn on", "type": "select",
@@ -391,10 +431,14 @@ PARAM_SCHEMA = [
         {"key": "signature", "label": "Signature split into compartments", "type": "signature"},
         {"key": "split_by", "label": "Split by the score of", "type": "signature"},
         {"key": "percentile", "label": "Growth-plate percentile", "type": "float", "min": 0, "max": 100,
-         "step": 0.5},
+         "step": 0.5, "help": "Positive bins whose split score is above this percentile of all bins form the "
+                              "growth-plate compartment. A zero-inflated score can make the percentile 0, and the rule "
+                              "then means 'any UMI of a split-signature gene' (manuscript data: the 90th percentile of "
+                              "the chondrocyte score is 0; Figure4h_compartment_summary.csv gives the value used)."},
         {"key": "de_sections", "label": "Sections in the compartment test", "type": "select",
          "options": ["all", "tumor"], "help": "all: growth-plate bins of every section against tumor-associated "
-         "bins; tumor: both compartments from tumor sections only (no between-section depth difference)."},
+         "bins; tumor: both compartments from tumor sections only (no between-section depth difference). On the "
+         "manuscript data both settings give the same test: every growth-plate bin is in the tumor-bearing section."},
     ]},
     {"key": "uncoupling", "title": "Distance to nearest partner (Figure 4i)", "fields": [
         {"key": "a", "label": "From (signature)", "type": "signature"},
@@ -409,11 +453,67 @@ PARAM_SCHEMA = [
         {"key": "radius_um", "label": "Radius (um, center to center)", "type": "float", "min": 0, "step": 1},
         {"key": "exclude_self", "label": "Measure target bins to the nearest other target bin", "type": "bool",
          "help": "Off (manuscript): a bin positive for both signatures counts as within the radius (distance 0). "
-                 "On: it is measured to the nearest other target bin. Co-positive bins are reported either way."},
+                 "On: it is measured to the nearest other target bin. Co-positive bins are reported either way. This "
+                 "only changes the target bins' own distances; it does not correct the baseline (all ROI bins), which "
+                 "includes the target bins themselves. Non-target baselines are in the sensitivity analyses."},
     ]},
     {"key": "moran", "title": "Spatially variable genes (Supplementary Figure S2)", "fields": [
         {"key": "n_genes", "label": "Highly variable genes tested", "type": "int", "min": 10, "max": 50000},
         {"key": "n_consensus", "label": "Top genes per section for the consensus", "type": "int", "min": 1},
+    ]},
+    # [APP] sensitivity analyses of the second review (step "Sensitivity analyses"); they add tables and figures and
+    # change no manuscript output
+    {"key": "sensitivity_analyses", "title": "Sensitivity analyses: general", "description": "Added after the "
+     "second review (CHANGES.md). Spatial block-bootstrap intervals resample square blocks of the tissue instead of "
+     "single bins, because neighbouring bins are not independent.", "fields": [
+        {"key": "block_um", "label": "Block size of the bootstrap intervals (um)", "type": "float", "min": 16,
+         "step": 16},
+        {"key": "n_boot", "label": "Bootstrap resamples", "type": "int", "min": 50, "max": 100000},
+    ]},
+    {"key": "sensitivity_analyses.lesion", "title": "Sensitivity analyses: A549 lesion flag", "description":
+     "The mouse probes for some conserved genes also capture the human A549 tumor RNA. A bin is flagged as lesion "
+     "when the UMIs of these genes in it and its nearest bins reach the minimum.", "fields": [
+        {"key": "genes", "label": "Cross-captured tumor genes", "type": "str_list"},
+        {"key": "pool_k", "label": "Nearest bins pooled", "type": "int", "min": 0, "max": 48},
+        {"key": "min_pooled_umi", "label": "Minimum pooled UMIs", "type": "int", "min": 1},
+    ]},
+    {"key": "sensitivity_analyses.uncoupling", "title": "Sensitivity analyses: Figure 4i", "description":
+     "The distance to the nearest partner under null models that keep the spatial pattern of the calls, for several "
+     "call sets and depth-matching draws.", "fields": [
+        {"key": "n_draws", "label": "Depth-matching draws of the pooled calls", "type": "int", "min": 1, "max": 100},
+        {"key": "n_perm", "label": "Random configurations per null model", "type": "int", "min": 1, "max": 100000},
+        {"key": "null_models", "label": "Null models", "type": "str_list",
+         "help": "csr_both (manuscript: both sets at random), fixed_b (osteoclasts kept, osteoblasts at random), "
+                 "fixed_a, habitat_fixed_b (osteoblasts at random within bone-lineage bins), random_labels."},
+        {"key": "call_sets", "label": "Call sets", "type": "str_list", "help": "pooled_dm, pooled, native."},
+        {"key": "habitat_classes", "label": "Tissue classes of the habitat null", "type": "str_list"},
+    ]},
+    {"key": "sensitivity_analyses.proximity", "title": "Sensitivity analyses: proximity tables", "fields": [
+        {"key": "n_strata", "label": "Depth strata of the matched baseline", "type": "int", "min": 2, "max": 100},
+        {"key": "block_um", "label": "Block size of the bootstrap interval (um)", "type": "float", "min": 16,
+         "step": 16},
+    ]},
+    {"key": "sensitivity_analyses.positivity", "title": "Sensitivity analyses: positivity", "fields": [
+        {"key": "roi_variants", "label": "Region-of-interest variants", "type": "str_list",
+         "help": "manuscript, call_rule_exclusion, assignment_exclusion, no_lesion."},
+        {"key": "rule_variants", "label": "Calling-rule variants", "type": "str_list",
+         "help": "manuscript, min_core_1, min_core_3, no_competitor_veto."},
+        {"key": "depth_schemes", "label": "Depth-matching schemes", "type": "str_list",
+         "help": "cap, quantile, quantile_roi (each section's ROI bins matched to the reference ROI)."},
+    ]},
+    {"key": "sensitivity_analyses.compartments", "title": "Sensitivity analyses: Figure 4h", "fields": [
+        {"key": "anatomical_distance_um", "label": "Distance to a chondrocyte-dense region (um)", "type": "float",
+         "min": 0, "step": 16},
+        {"key": "min_region_bins", "label": "Minimum bins of a chondrocyte-dense region", "type": "int", "min": 1},
+        {"key": "n_depth_reps", "label": "Replicates of the depth-adjusted tests", "type": "int", "min": 1,
+         "max": 100},
+        {"key": "pseudobulk_block_um", "label": "Block size of the pseudobulk test (um)", "type": "float",
+         "min": 16, "step": 16},
+    ]},
+    {"key": "sensitivity_analyses.clustering", "title": "Sensitivity analyses: Leiden domains", "fields": [
+        {"key": "harmony_check", "label": "Also cluster without Harmony", "type": "bool"},
+        {"key": "marker_padj", "label": "Adjusted P of a significant domain marker", "type": "float", "min": 0,
+         "max": 1, "step": 0.01},
     ]},
 ]
 
@@ -429,7 +529,8 @@ STEP_LABELS = {
     "uncoupling": "Osteoblast-to-osteoclast distance (Figure 4i)",
     "proximity": "Proximity tables (within 50 um)",
     "moran": "Moran's I (Supplementary Figure S2, slow)",
-    "sensitivity": "Three-gene-set sensitivity (Methods, slow)",
+    "sensitivity": "Three-gene-set sensitivity (Methods)",
+    "sensitivity_analyses": "Sensitivity analyses (second review)",
     "project_fine_bins": "Project labels onto the QC bin size",
     "write_h5ad": "Write the joint AnnData object",
     "figures": "Draw figures",
@@ -640,6 +741,24 @@ def validate_config(cfg: dict) -> tuple[list[str], list[str]]:
         err.append("compartments.tumor_conditions must be a list of condition names")
     if not isinstance(cfg.get("proximity", {}).get("exclude_self", False), bool):
         err.append("proximity.exclude_self must be true or false")
+    sa = cfg.get("sensitivity_analyses") or {}
+    for path, lo, integer in (("block_um", 1, False), ("n_boot", 1, True), ("lesion.pool_k", 0, True),
+                              ("lesion.min_pooled_umi", 1, True), ("uncoupling.n_draws", 1, True),
+                              ("uncoupling.n_perm", 1, True), ("proximity.n_strata", 1, True),
+                              ("proximity.block_um", 1, False), ("compartments.anatomical_distance_um", 0, False),
+                              ("compartments.min_region_bins", 1, True), ("compartments.n_depth_reps", 1, True),
+                              ("compartments.pseudobulk_block_um", 1, False), ("clustering.marker_padj", 0, False)):
+        v = sa
+        for p in path.split("."):
+            v = v.get(p) if isinstance(v, dict) else None
+        if v is None:
+            continue                                   # absent: the default applies
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v < lo \
+                or (integer and int(v) != v):
+            err.append(f"sensitivity_analyses.{path} must be a {'whole ' if integer else ''}number >= {lo}, got {v!r}")
+    masks = (sa.get("compartments") or {}).get("growth_plate_masks", {})
+    if not isinstance(masks, dict):
+        err.append("sensitivity_analyses.compartments.growth_plate_masks must map sample id -> GeoJSON path")
 
     # signatures
     sigs = cfg.get("signatures") or {}

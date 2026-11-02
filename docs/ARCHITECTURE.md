@@ -126,23 +126,24 @@ cfg["steps"]["figures"] else []))`, then `ba.run_analysis_from_config(cfg, <run_
 | `FigureS1_qc_per_bin_{Q}.csv.gz` | sample, bin_size, n_genes_by_counts, total_counts, pct_counts_mt — every bin of the QC bin size before filtering (S1 histograms). A section without square_{qc_bin_size} falls back to the analysis bin size (bin_size says which), with a warning |
 | `Figure6b_receptor_panel_depth_matched.csv` | gene, role, sample, roi, mean_raw, pct_detected_raw, mean_dm, pct_detected_dm, n_positive_dm, n_bins, ci_lo_dm, ci_hi_dm, median_umi_per_bin, fold_dm |
 | `FigureS4_adipocyte_genes_depth_matched.csv` | same columns |
-| `Figure4g_6a_positivity_native_depth_roi.csv` | signature, sample, roi, n_positive, n_bins, pct_positive, ci_lo, ci_hi, mean_score, fold_vs_reference; plus fold_tumor_over_control (same value on every row of a signature) when there are exactly two samples |
-| `Figure4g_6a_positivity_depth_matched.csv` | signature, sample, pct_positive_mean, pct_positive_sd, n_positive_mean, n_bins, mean_score |
+| `Figure4g_6a_positivity_native_depth_roi.csv` | signature, sample, roi, n_positive, n_bins, pct_positive, ci_lo, ci_hi, mean_score, fold_vs_reference; plus fold_tumor_over_control (same value on every row of a signature) when there are exactly two samples. Both folds are ratios of the exact rates n_positive / n_bins (fold_vs_reference rounded to 4 decimals, fold_tumor_over_control to 2), not of the rounded pct_positive |
+| `Figure4g_6a_positivity_depth_matched.csv` | signature, sample, pct_positive_mean, pct_positive_sd, n_positive_mean, n_bins, mean_score, ci_lo, ci_hi. pct_positive_sd = SD over the downsampling replicates only; ci_lo, ci_hi = Wilson 95% interval (percent) of round(n_positive_mean) of n_bins |
 | `leiden_domain_screen.csv` | domain, n_bins, ubiquitous_fraction, median_genes_per_umi, top_markers, de_uninterpretable |
 | `leiden_domain_markers.csv` | scanpy rank_genes_groups_df columns (group, names, scores, logfoldchanges, pvals, pvals_adj, pct_nz_group, pct_nz_reference) |
-| `Figure4h_osteoclast_compartment_DE.csv` | group, names, scores, logfoldchanges, pvals, pvals_adj |
+| `Figure4h_osteoclast_compartment_DE.csv` | group, names, scores, pvals, pvals_adj, log2fc_mean_cp10k, pct_group, pct_rest, selection_gene. log2fc_mean_cp10k = log2((mean CP10k in the group + 1) / (mean CP10k in the other compartment + 1)), CP10k = expm1(lognorm); pct_group / pct_rest = % of bins detecting the gene; selection_gene = gene of the split_by signature's scored list (defines the growth-plate compartment, higher there by construction). scanpy's logfoldchanges is not written (1e-9 floor: \|values\| of 19-32 for genes undetected in one compartment) |
+| `Figure4h_compartment_summary.csv` | sample ("all" first, then one row per section), threshold (the split_by score threshold used: the compartments.percentile of all bins; also `uns["compartment_threshold"]` of the h5ad), threshold_is_zero, pct_bins_above_threshold, n_growth_plate, n_tumor_associated, n_non_growth_plate_control, n_growth_plate_outside_roi, n_tumor_associated_outside_roi, median_umi_growth_plate, median_umi_tumor_associated |
 | `Figure3a_program_composition_native.csv`, `Figure3b_program_composition_depth_matched.csv` | sample, program, n_bins, pct_of_all_bins, pct_of_assigned_bins, sample_ambiguous_pct |
 | `leiden_seed_stability_adjusted_rand_index.csv` | seed_a, seed_b, n_clusters_a, n_clusters_b, ARI |
 | `FigureS5_domain_by_signature_zscores.csv` | leiden_domain, then one column per primary signature (label) |
-| `FigureS5_unresolved_bins.csv` | unresolved_bins, all_bins, percent |
+| `FigureS5_unresolved_bins.csv` | sample, unresolved_bins, all_bins, percent, unresolved_bins_roi, all_bins_roi, percent_roi; first row sample "all" (all sections pooled, the number quoted before), then one row per section; the _roi columns count bins of the region of interest (in_marrow_roi). Older results have one row and only unresolved_bins, all_bins, percent |
 | `Figure4i_observed_to_null_summary.csv` | sample, n_a, n_b, n_units_roi, ratio_obs_null_mean, ratio_obs_null_lo, ratio_obs_null_hi, p_greater_than_null_mean, median_nn_um, mean_nn_um, null_mean_um, status, ratio_of_ratios_vs_reference, note |
 | `Figure4i_distance_distributions_observed_and_null.csv` | sample, source ("observed" / "null"), distance_um, count |
 | `{from}_to_{to}_proximity.csv` | one per proximity pair (defaults `fibroblast_to_osteoblast_proximity.csv`, `macrophage_to_osteoclast_proximity.csv`, original columns with the signature names substituted) |
-| `morans_I_per_section.csv` | sample, gene, I, pval_norm, var_norm, pval_norm_fdr_bh (when available), rank_in_sample |
+| `morans_I_per_section.csv` | sample, gene, I, pval_norm, var_norm, pval_norm_fdr_bh (when available; Benjamini-Hochberg over the genes with a defined pval_norm of that section, NaN for genes with zero variance there), rank_in_sample |
 | `FigureS2_spatially_variable_genes_morans_I.csv` | gene, `moranI_<sample id>` per sample, mean_rank |
 | `Table1_gene_signatures.csv` | signature, canonical_markers, signature_genes, genes_counted_toward_two_gene_rule, excluded_genes |
 | `per_bin_signature_calls_{B}.csv.gz` | barcode, sample_id, section, x_um, y_um, in_region_of_interest, total_umi, assigned_signature, tissue_class, leiden_domain, `positive_<slug>` per primary signature, `positive_<b>_pooled_depthmatched`, `positive_<a>_pooled_depthmatched` (uncoupling pair; suffix `_pooled` for calls "pooled", no columns for "native") |
-| `gene_set_sensitivity_three_gene_sets.csv` | optional (steps.sensitivity) |
+| `gene_set_sensitivity_three_gene_sets.csv` | optional (steps.sensitivity): gene_set, signature, sample, n_units_roi, n_positive_native, pct_native, ci_lo, ci_hi, pct_depth_matched_mean, pct_depth_matched_sd, genes_used, genes_missing (comma-separated gene lists of the variant; missing genes are also reported as warnings) |
 | `joint_{B}.h5ad` | optional (steps.write_h5ad) |
 | `labels_{Q}_projected.csv` | optional (steps.project_fine_bins) |
 
@@ -173,7 +174,8 @@ A step that is disabled or cannot run leaves its columns out (or empty) and the 
 }
 ```
 `metrics` groups (as available): "Sections", "Positivity, native depth (ROI)", "Positivity, depth-matched (ROI)",
-"Tissue assignment", "Distance to nearest partner", "Proximity", "Leiden domains", "Host receptor panel".
+"Tissue assignment", "Distance to nearest partner", "Proximity", "Leiden domains" (including the unresolved share of
+each section), "Host receptor panel".
 
 ### figures/manifest.json (written by bone_figures.make_figures)
 ```json

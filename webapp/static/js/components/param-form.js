@@ -61,8 +61,10 @@ function obj(parent, key) {
 
 /** Accessor of cfg[section][key] (section null = top level) with its default. */
 function accessor(ctx, section, key) {
-  const parent = () => (section ? obj(ctx.cfg, section) : ctx.cfg);
-  const defParent = section ? (ctx.defaults[section] || {}) : ctx.defaults;
+  // a section may be nested: "sensitivity_analyses.uncoupling" is cfg.sensitivity_analyses.uncoupling
+  const parts = section ? section.split('.') : [];
+  const parent = () => parts.reduce((o, p) => obj(o, p), ctx.cfg);
+  const defParent = parts.reduce((o, p) => (o && o[p]) || {}, ctx.defaults);
   return { get: () => parent()[key], set: (v) => { parent()[key] = v; }, def: defParent[key], path: section ? `${section}.${key}` : key };
 }
 
