@@ -129,15 +129,20 @@ all fixed and covered by tests:
 
 ## Methodological notes (defaults unchanged, options added)
 
-* **Depth matching caps, it does not match.** Bins above the shallower section's median are downsampled to it and bins
-  below are kept, so the deeper (tumor-bearing) section keeps more bins at the target depth: a residual depth advantage
-  in every depth-matched comparison. `scoring.depth_matching = "quantile"` downsamples each bin of the deeper section to
-  the shallower section's depth at the same quantile, so the per-bin depth distributions match. Worth a sensitivity check.
-* **Proximity counts self-matches.** A bin positive for both signatures is its own nearest target (0 µm), and the
-  "all ROI bins" baseline includes the target bins. `proximity.exclude_self = true` measures such bins to the nearest
-  other target bin; the number of co-positive bins is now reported in every table.
-* **Figure 4h mixes sections.** Growth-plate bins come from both limbs (two-fold capture difference);
-  `compartments.de_sections = "tumor"` restricts the contrast to the tumor-bearing section.
+Three of these notes were wrong or misleading as first written; the second review (below) corrected them.
+
+* **Depth matching caps both sections.** Bins above the shallower section's median UMI per bin are downsampled to it,
+  bins below are kept. On SR007144 this lowers the control too (its ROI mean falls from 81.9 to 47.5 UMI); the residual
+  advantage of the deeper section is small (+4.8%). The main effect is that depth-matched magnitudes depend on the scheme.
+  `scoring.depth_matching = "quantile"` matches whole-section distributions, which leaves the tumor ROI about 15%
+  shallower than the control ROI (conservative for tumor-enriched programs); it is not a correction of `cap`.
+* **Proximity counts self-matches, and the baseline includes the targets.** A bin positive for both signatures is its own
+  nearest target (0 µm), and the "all ROI bins" baseline includes the target bins. `proximity.exclude_self = true` only
+  changes the target bins' own distances; it does not correct the baseline. Non-target and depth-matched baselines are in
+  the sensitivity analyses.
+* **Figure 4h does not mix sections on SR007144.** Every growth-plate bin is in the tumor-bearing section, so
+  `compartments.de_sections = "tumor"` gives the same test. The confound that matters is within that section: the
+  growth-plate bins are about 2.15 times deeper than the tumor-associated bins.
 * **Null size.** Native calls use 50 random gene sets, depth-matched and pooled calls 20 (`scoring.n_perm`,
   `scoring.n_perm_resampled`).
 
@@ -151,3 +156,139 @@ all fixed and covered by tests:
   built-in implementation (tested against squidpy).
 * `tools/make_demo_data.py`: synthetic Visium HD tibiae for the demo and the tests; `tests/`: unit, regression,
   end-to-end and API tests.
+
+---
+
+# Second scientific review (2026-11-02)
+
+The fixed code was reviewed again, this time for the analysis itself rather than for coding defects. Nine reviewers each
+took one area. Every finding was then checked twice, once against the code and once for its scientific impact, on the
+SR007144 results. Of 34 findings, 33 were confirmed (most with a lower severity than first claimed) and 1 was not a
+problem. 148 calculations were confirmed correct, including the data loading, units, QC, depth-matching subsampler,
+scores and calls, Wilson intervals, distances and Moran's I; every reported number reproduces from the raw data.
+
+**The headline directions hold under every check**: osteoclast, osteoblast and macrophage positivity far higher, and
+granulocyte and erythroid positivity lower, in the tumor-bearing tibia; RANKL up. They hold within depth strata too. The
+problems are in how some results are tested and described.
+
+## What the review found
+
+| # | Result | Finding (SR007144) | Severity | Done |
+|---|---|---|---|---|
+| F1 | Figure 4i "uncoupling" | The null places both osteoblast and osteoclast calls at random over the ROI. Pooled calls are clumped and both lineages sit on bone, so the ratio exceeds 1 whatever the osteoblasts do. The 1.73 / 2.88 split into an osteoblast-specific part of 0.40 / 0.44 (closer, not farther) and an osteoclast-pattern part of about 4.4 / 6.5. Under other nulls, the 1.66 between-limb ratio becomes 0.61–1.60. | major | sensitivity, caption |
+| F7, F8, F26 | Figure 4h compartments | "Above the 90th percentile" collapses to "at least one chondrocyte-gene UMI": 44.5% of bins score exactly 0, so the percentile is 0. Only about 2 of the 116 "growth-plate" bins are near the growth plate; the rest sit at the lesion and periosteal margin. Acan and Comp define the split, so they are higher there by construction. | major | sensitivity, summary table, caption, flags |
+| F9, F10, G1.2 | Figure 4h test | Growth-plate bins are 2.15 times deeper. P values treat neighbouring bins of one section as independent. 27% of the tested bins lie outside the ROI. Acp5 (and probably Ctsk, Mmp9) is robust; mt-Co2, mt-Cytb and Itm2b are not. | minor–major | sensitivity, caption |
+| G1.1 | "macrophages near osteoclasts" (115/405, 28.4% vs 17.1%) | Calls sit in deep bins (median 271 vs 65 UMI). Against ROI bins of the same depth there is no enrichment: −3.3 pp, 95% block CI −8.9 to +3.1. | major | sensitivity |
+| F11 | Fibroblast–osteoblast proximity | The baseline includes the target bins. Against non-target bins the tumor row is 1.14 times, not 0.92 times. The control's strong co-location holds. | minor | sensitivity, help text |
+| F4, F5 | Region of interest | The control ROI keeps 25–45% skeletal muscle (tumor 8–17%), which inflates folds 1.2–1.5 times (osteoclast 171 → 113–139). For nerve and smooth muscle the 90th percentile is 0, so a single UMI of Acta2, Tagln, Myl9 or Pmp22 excludes a bin. This removes 27% of tumor osteoclast-positive bins, which is conservative. | minor | sensitivity |
+| F3, F23 | Positivity rule | The 95% null threshold almost never decides; a call means "≥ 2 core genes detected, not out-competed". The competitor veto acts almost only in the control (native folds 100 → 171, 19 → 70). Osteocyte and fibroblast contrasts depend on min_core = 2. | minor | sensitivity |
+| F6, F24, F25 | Depth matching | Depth-matched magnitudes depend on the scheme (RANKL 31 times with cap vs 23 times with distribution matching; the adipocyte-gene depletion roughly doubles under cap). The depth-matched SD covers the downsampling only. | minor | sensitivity, Wilson columns, help text |
+| G2.1, G2.2, G4.2 | Figure 4i calls | The calls come from one depth-matching draw. The ratio of ratios spans 1.42–1.76 over draws, and about 27–30% of tumor per-bin calls change between draws. | minor | sensitivity |
+| F12 | All bin-level intervals | One section per condition; Wilson intervals are 2–6 times too narrow for the tumor section. | limitation | captions, block-bootstrap intervals |
+| F2 | Methods sentence | "Human A549 transcripts are not captured" is false. Mouse probes cross-capture the lesion (Krt7 in 2,523 vs 17 bins). It lies inside the ROI (about 17% of the tumor ROI) and makes up much of the tumor-section "unresolved" domain. Effect on rates: conservative. Itm2b in Figure 4h is probably tumor RNA. | major (text) | fixed, lesion flag, sensitivity |
+| F13–F18, F20–F22, F19, G3 | Reporting | See the next section. Also: S5 names favour rare programs; domain 7 has no marker; Harmony on the section label confounds batch and condition; the three-gene-set check was never run in the delivered results. | minor | fixed or sensitivity |
+| G4.1 | Pooling across the ROI edge | Not a problem: the borrowed neighbours are the same tissue. | — | — |
+
+## Fixed (outputs that change)
+
+* `Figure4g_6a_positivity_native_depth_roi.csv`: `fold_vs_reference` and `fold_tumor_over_control` come from the exact
+  counts, not from rounded percentages (osteoclast 169.36 → 171.30; megakaryocyte `fold_vs_reference` was off by 26%).
+* `Figure4g_6a_positivity_depth_matched.csv`: new `ci_lo` and `ci_hi` columns, a Wilson interval on the mean count.
+* `Figure4h_osteoclast_compartment_DE.csv`: the scanpy `logfoldchanges` column is replaced. In 27% of rows it held
+  ±19–31 values, because a gene undetected in one group divides by a 1e-9 floor. It is now `log2fc_mean_cp10k`, with
+  `pct_group`, `pct_rest` and `selection_gene`, which marks the split signature's genes.
+* New `Figure4h_compartment_summary.csv`, with the threshold actually used, the bins per compartment and section, the
+  bins outside the ROI and the median UMI per compartment. A warning is raised when the threshold is 0.
+* `morans_I_per_section.csv`: `pval_norm_fdr_bh` was NaN for every tumor-section gene on the squidpy path. It is now BH
+  over the finite P values.
+* `FigureS5_unresolved_bins.csv`: one row per section after the pooled row (control 18.3%, tumor-bearing 42.3%).
+* `gene_set_sensitivity_three_gene_sets.csv`: new `genes_used` and `genes_missing` columns, and a warning for absent
+  variant genes (Bglap).
+* Captions:
+  * S1: the 10-gene criterion was applied to the 16 µm bins. Retention is now given at 16 µm (78.1% / 90.4%), not read
+    off the 8 µm curve.
+  * 3a: the threshold-0 classes and the share of bins not drawn (48.6% / 29.0%).
+  * 4g and 6a: what the Wilson intervals and the SD cover.
+  * 4h: the effective rule, the bins per section, the depth difference, descriptive P values and the selection genes (†).
+  * 4i: the null model, the random-placement-only interval and the single draw.
+  * S5: the per-section unresolved shares.
+* The module docstring, the `collapse_unresolved` note and the help glossary on A549 cross-capture. The parameter help
+  texts for depth matching, `exclude_self`, the compartment percentile, `de_sections` and the ROI percentile.
+
+## Sensitivity analyses added (`bone_sensitivity/`)
+
+A new step, "Sensitivity analyses (second review)" (`steps.sensitivity_analyses`, on by default; settings in
+`sensitivity_analyses`, editable on the Parameters page). It writes extra tables and figures and changes no manuscript
+output; a test runs the analysis with the step on and off and compares every manuscript table. A module that fails
+becomes a warning. The step first flags the cross-captured A549 lesion: per-bin `lesion_umi_pooled` and `in_lesion`
+(Krt7 + Krt18 UMIs over a bin and its 8 neighbours ≥ 2).
+
+| Module | Tables (`sensitivity_*.csv`) | Figure | Answers |
+|---|---|---|---|
+| uncoupling | `Figure4i_null_models`, `_summary`, `_decomposition`, `_call_stability` | `Sensitivity_Figure4i_null_models` | F1, G2: five null models (csr_both = manuscript, fixed_b, fixed_a, habitat_fixed_b, random_labels) × three call sets × five depth-matching draws; the decomposition of the ratio; per-bin call stability (also as per-bin `positive_fraction_*_pooled_depthmatched_draws`) |
+| proximity | `proximity` | `Sensitivity_proximity_baselines` | G1.1, F11: non-target and depth-matched baselines (strata at the ROI and the source quantiles), 200 µm block-bootstrap intervals, the `program_dm` assignment |
+| positivity | `positivity`, `positivity_folds`, `roi_composition`, `roi_exclusion_rules`, `positivity_rule_diagnostics`, `positivity_depth_targets` | `Sensitivity_positivity_folds` | F3–F6, F12, F23, F24: four ROI variants (manuscript, call-rule exclusion, assignment exclusion, without the lesion) × four rules (manuscript, min_core 1 and 3, no veto) × native / cap / quantile / ROI-quantile depth; Katz and spatial block-bootstrap fold intervals |
+| compartments | `Figure4h_diagnostics`, `_regions`, `_variants`, `_de`, `_top_genes` | `Sensitivity_Figure4h_variants` | F7–F10, F26, G1.2: effective threshold; anatomical growth plate (osteoclast bins within 100 µm of a chondrocyte-dense region); ROI-only, depth-adjusted and depth-balanced spatial pseudobulk tests; drawn growth-plate polygons when configured |
+| clustering | `FigureS5_unresolved_by_section`, `leiden_domain_annotation`, `leiden_harmony` | `Sensitivity_FigureS5_domains` | F2, F19–F22: unresolved share per section and ROI, overlap with the lesion, domain composition and flags, and the clustering without Harmony against the seed-to-seed ARI |
+
+## Status
+
+* Tested on the synthetic demo data: every module, its figure and the integration. 196 tests pass. One end-to-end
+  comparison fails only when run after the API tests: for one zero-variance gene, a Moran's I P value is NaN in one run and
+  0 in the other, which suggests the squidpy and built-in paths differ. It does not involve the sensitivity step. Not yet
+  resolved.
+* **Not yet run on SR007144.** The numbers quoted above come from the review's own checks on the existing results. The
+  sensitivity tables for the real data will come from the next run (about 25 minutes).
+
+## Recommended next changes
+
+These are decisions for the authors. Each changes manuscript numbers or text, so none is applied by default. Run the
+sensitivity analyses on SR007144 first and decide from their tables.
+
+1. **Figure 4i: replace the null, or the claim.**
+   * Report the distance against a null that keeps the osteoclast pattern (`fixed_b`, or `habitat_fixed_b` restricted to
+     bone-lineage bins), averaged over depth-matching draws (mean and range), next to the manuscript's complete
+     spatial randomness.
+   * Withdraw "osteoblasts farther than chance" and "uncoupling in the tumor-bearing limb" unless the pattern-preserving
+     nulls support them. On the review's checks they do not.
+   * For a formal test, use a cross-type K or pair-correlation function with spatial-block inference.
+2. **Figure 4h: define the growth plate by anatomy, or rename the contrast.**
+   * Draw the physis on the H&E and set `sensitivity_analyses.compartments.growth_plate_masks`. The ROI editor would
+     need a second region type for this; it is not built yet.
+   * If only about 2 bins qualify, drop the growth-plate interpretation and describe the panel as osteoclast bins with
+     vs without a chondrocyte-gene transcript at the lesion margin.
+   * Test with the depth-adjusted or pseudobulk variant, remove the bin-level P values (or label them descriptive),
+     drop the selection genes (Acan, Comp) from the bars, and annotate Itm2b as likely tumor RNA.
+3. **Macrophage–osteoclast proximity.**
+   * Report the depth-matched comparison.
+   * Remove "enriched near osteoclasts" unless it survives: on the review's checks it does not.
+   * Make the non-target baseline the default column of both proximity tables.
+4. **Region of interest.**
+   * Exclude skeletal muscle, smooth muscle and nerve by the pipeline's call rule (or a drawn ROI) instead of a 90th
+     percentile, which is 0 for sparse scores.
+   * Report the muscle share of each section's ROI and recompute the quoted folds and counts (405 macrophage-positive
+     bins, 1,734 osteoclast-positive bins).
+5. **Positivity: describe the rule as computed.**
+   * Write it as "≥ 2 core genes co-detected, not out-competed; the score threshold rarely binds".
+   * Add the min_core 1/2/3 table.
+   * Quote folds whose control count is single-digit as lower bounds or with block-bootstrap intervals (osteoclast
+     171× rests on 7 control bins, macrophage 70× on 4).
+6. **Depth matching.** Keep `cap`, but report the ROI-quantile scheme next to it and do not quote precise depth-matched
+   folds (for example "RANKL > 20-fold" rather than 31.07).
+7. **Lesion.**
+   * Delineate the A549 lesion (the `in_lesion` flag or a drawn region) and report the tumor-section rates with and
+     without it.
+   * Correct the Methods sentence on species specificity.
+8. **Supplementary S5.**
+   * Report the unresolved share per section.
+   * Name domains by their top programs (`leiden_domain_annotation.csv`) and flag the domain without markers.
+   * Disclose that Harmony on the section label cannot separate batch from condition.
+9. **Statistics throughout.**
+   * One animal and one section per condition: avoid inferential language about the tumor effect, and present bin-level
+     intervals as within-section only.
+   * More animals are the only remedy for population-level claims.
+10. **Software.**
+    * Run the analysis on SR007144 with the sensitivity step.
+    * Resolve the Moran's I test-order issue.
+    * Add growth-plate regions to the ROI editor.
+    * If the authors adopt items 3–5, move the non-target baseline and the block-bootstrap intervals into the main tables.
