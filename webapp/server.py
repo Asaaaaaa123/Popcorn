@@ -650,6 +650,15 @@ def column_kind(s: pd.Series) -> str:
     return "text"
 
 
+def is_yes_no(s: pd.Series) -> bool:
+    """True when a column holds yes/no values: booleans, text such as "True" / "False", or numbers that are all 0 or 1.
+    A positivity column of shares (positive_fraction_..._draws: the share of the depth-matching draws in which a bin is
+    positive, 0 to 1) is a number, not a call."""
+    if pd.api.types.is_numeric_dtype(s) and not pd.api.types.is_bool_dtype(s):
+        return bool(s.dropna().isin([0, 1]).all())
+    return True
+
+
 def read_table(path: Path) -> pd.DataFrame:
     sep = "\t" if path.name.lower().endswith((".tsv", ".tsv.gz")) else ","
     try:
@@ -867,7 +876,10 @@ class BinsTable:
             if col in BIN_SKIP_COLUMNS:
                 continue
             s = df[col]
-            if col == "in_region_of_interest" or col.startswith("positive_") or column_kind(s) == "bool":
+            # a positive_* column is a call when its values are yes/no; the share of draws in which a bin is positive
+            # is a number even when every share is 0 or 1 (one draw)
+            if col == "in_region_of_interest" or column_kind(s) == "bool" or (
+                    col.startswith("positive_") and not col.startswith("positive_fraction_") and is_yes_no(s)):
                 self.kinds[col] = "bool"
             elif col not in BIN_CATEGORY_COLUMNS and pd.api.types.is_numeric_dtype(s):
                 self.kinds[col] = "number"

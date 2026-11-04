@@ -1,7 +1,8 @@
 // spatial-viewer.js — the spatial viewer: every bin of a section drawn at its position (x, y in µm, y down, equal
-// aspect), colored by a label, a call, a number or the summed UMI counts of genes, with overlays drawn on top (genes,
-// each in its own color where it is detected, added with the "+ Add gene" button; positivity calls, region of
-// interest) and the H&E image underneath. One, two or four panels side by side,
+// aspect), colored by a label, a number or the summed UMI counts of genes (or gray: no coloring), with layers drawn on
+// top (genes, each in its own color where it is detected, and yes/no fields: positivity calls, region of interest,
+// quality control; added with the "+ Add layer" button, stored as the panel's "overlays") and the H&E image
+// underneath. One, two or four panels side by side,
 // each with its own section and coloring; pan and zoom are linked across the panels (toggle), and the position under
 // the mouse shows as a crosshair in the other panels. Used by the Viewer tab of a run (runSource below) and by the data
 // explorer of a project (a projectSource on the same interface).
@@ -30,8 +31,9 @@
 //   µm, css px per µm; auto = a fit nobody has moved since, fitted again when the sections or the sizes change);
 //   sameScale (panels colored by the same genes or number share one color range: the smallest low end, the largest
 //   99th percentile); pointSize; image {on, opacity (how much of the image shows through the bins)};
-//   panels [{sample, field ('' | field name | '__gene__'), genes [names, summed], overlays [bool field | 'gene:a,b'],
-//            dim (dim the coloring under overlays), hidden {field: [legend keys]}, views {sample: {cx, cy, scale,
+//   panels [{sample, field (field name of a label or number | '__gene__' | '__none__'; a yes/no field found here is
+//            made a layer), genes [names, summed], overlays (the layers) [bool field | 'gene:a,b'],
+//            dim (dim the coloring under the layers), hidden {field: [legend keys]}, views {sample: {cx, cy, scale,
 //            auto?}} (views when not linked)}];
 //   caches shared by the panels: samples, data (Map sample -> prepared bins), geneData (Map 'sample\ngenes' ->
 //   prepared counts, the last 40 used), images (Map sample -> loaded H&E | {none: true}).
@@ -51,10 +53,11 @@ const FIELD_LABELS = {
   total_umi: 'UMIs per bin',
   n_genes: 'Genes per bin',
   pct_mt: 'Mitochondrial UMIs (%)',
+  lesion_umi_pooled: 'Lesion UMIs (pooled)',
 };
 const CATEGORY_ORDER = ['tissue_class', 'assigned_signature', 'leiden_domain'];
 const NUMBER_ORDER = ['total_umi', 'n_genes', 'pct_mt'];
-const DEFAULT_FIELDS = ['tissue_class', 'assigned_signature', 'leiden_domain', 'in_region_of_interest', 'total_umi'];
+const DEFAULT_FIELDS = ['tissue_class', 'assigned_signature', 'leiden_domain', 'total_umi'];
 const LOG_FIELDS = new Set(['total_umi', 'n_genes']);
 const BOOL_TEXT = { in_region_of_interest: ['Inside', 'Outside'], passes_qc: ['Passes', 'Fails'] };
 // suffix of pooled calls in the per-bin table: _pooled_depthmatched (uncoupling.calls "pooled_dm") or _pooled ("pooled")
@@ -79,6 +82,8 @@ const SEVERAL = 'several';
 const MISSING = '__missing__'; // legend key of bins without a value
 const ZERO = '__zero__'; // legend key of bins where none of the genes is detected
 const GENE_FIELD = '__gene__'; // "Color by" value of the gene coloring
+const NONE_FIELD = '__none__'; // "Color by" value of no coloring: every bin in the neutral color, under the layers
+const BASE = '__base__'; // legend key of the gray bins of no coloring (hidden: the layers alone)
 const GENE_OVERLAY = 'gene:'; // overlay key prefix: 'gene:Ctsk,Acp5' = bins where the summed count is above 0
 const MAX_GENES = 50;
 const MAX_OVERLAYS = OVERLAY_PALETTE.length; // per panel: one palette color each (11), still told apart
@@ -157,6 +162,9 @@ const LUT = Array.from({ length: LEVELS }, (_, k) => ramp(VIRIDIS, LUT_START + (
 
 export function fieldLabel(key) {
   if (FIELD_LABELS[key]) return FIELD_LABELS[key];
+  // sensitivity analysis: the share (0 to 1) of the depth-matching draws in which a bin is pooled-positive
+  const share = /^positive_fraction_(.+)_pooled_depthmatched_draws$/.exec(key);
+  if (share) return `Share of draws positive: ${share[1].replace(/_/g, ' ')} (pooled, depth-matched)`;
   if (key.startsWith('positive_')) {
     const raw = key.slice('positive_'.length);
     const m = raw.match(POOLED_RE);
@@ -239,7 +247,7 @@ function patchState(st, patch, dropped = []) {
 /** The warning when overlays were not added: a panel has at most MAX_OVERLAYS. */
 function tooManyOverlays(keys) {
   const names = keys.map(overlayLabel).join(', ');
-  toast(`A panel shows at most ${MAX_OVERLAYS} overlays (one color each)${names ? `; not added: ${names}` : ': remove one to add another'}.`, 'warning');
+  toast(`A panel shows at most ${MAX_OVERLAYS} layers (one color each)${names ? `; not added: ${names}` : ': remove one to add another'}.`, 'warning');
 }
 
 function normalizeSamples(res) {
@@ -525,10 +533,16 @@ function numberRange(f) {
  * legend = [{key, label, color, count, off}], visible = 1 per drawn bin, scale = color bar of a number.
  * range {lo, hi}: the color range of a number shared with other panels (default: numberRange(f)).
  */
-function buildStyle(d, f, hidden, range = null) {
+function buildStyle(d, f, hidden, range = null, base = false) {
   if (!f) {
-    const s = sortIntoGroups(d, 1, () => 0, () => false);
-    return { kind: 'none', groups: [{ color: NEUTRAL, idx: s.idx[0] }], legend: [], visible: s.visible, shown: s.shown, scale: null };
+    // no coloring: every bin in the neutral color; as the base map of "Color by: None" (base) it is one legend entry
+    // that can be hidden, which leaves the layers alone (e.g. only the bins passing quality control, over the H&E image)
+    const off = base && hidden.has(BASE);
+    const s = sortIntoGroups(d, 1, () => 0, () => off);
+    return {
+      kind: 'none', groups: s.idx[0] ? [{ color: NEUTRAL, idx: s.idx[0] }] : [], visible: s.visible, shown: s.shown, scale: null,
+      legend: base ? [{ key: BASE, label: 'Every bin (gray)', color: NEUTRAL, count: s.counts[0], off }] : [],
+    };
   }
   // group of every bin, its color and legend entry; the last group holds bins without a value
   let groupOf;
@@ -1496,7 +1510,8 @@ export function spatialViewer({ source, store, binUm: binUmOption, emptyText }) 
     let style = null;
     let scaleUsed = ''; // rangeText of the shared color range the style was built with ('' = its own range)
     let ovl = null;
-    let vis = null; // 1 per bin drawn by the coloring or by an overlay (hover targets)
+    let vis = null; // 1 per bin drawn by the coloring or by a layer (hover targets)
+    let shownCount = 0; // bins drawn (by the coloring or a layer)
     let geneVecs = new Map(); // genes key -> prepared counts of the current section
     let geneErrors = new Map(); // genes key -> error message
     let genePending = new Set();
@@ -1530,24 +1545,24 @@ export function spatialViewer({ source, store, binUm: binUmOption, emptyText }) 
     const geneBox = hasGenes ? geneInput({ id: ids.genes, label: 'Genes', submitLabel: 'Show', search: searchGenes, onSubmit: setGenes }) : null;
     const geneCtl = geneBox ? h('div', { class: 'sv-control sv-control-wide', hidden: true },
       h('label', { for: ids.genes }, 'Genes (several are summed)'), geneBox.el) : null;
-    // overlays: "+ Add gene" opens a popover (a gene box, then the yes/no fields not shown yet); every overlay is a chip
-    // of the row under the controls, in its color, with its remove button
+    // layers (called overlays in the code and the store): "+ Add layer" opens a popover (a gene box, then the yes/no
+    // fields not shown yet); every layer is a chip of the row under the controls, in its color, with its remove button
     const addBtn = h('button', {
       class: 'btn sv-add', type: 'button', 'aria-haspopup': 'dialog', 'aria-expanded': 'false',
-      title: hasGenes ? 'Show a gene on this map in its own color, on top of the coloring (or a call or region)'
-        : 'Show a call or region on top of the coloring',
+      title: hasGenes ? 'Add a layer on top of the coloring: a gene in its own color, or a call or region'
+        : 'Add a layer on top of the coloring: a call or region',
       onClick: toggleAdd,
-    }, icon('plus', { size: 15 }), hasGenes ? 'Add gene' : 'Add overlay');
+    }, icon('plus', { size: 15 }), 'Add layer');
     let addPop = null; // the open popover of addBtn: {pop, box (its gene box)}
     const dimInput = h('input', { type: 'checkbox', checked: st.dim, onChange: () => { st.dim = dimInput.checked; requestRender(); } });
-    const ovlChips = h('ul', { class: 'chip-list sv-ovl-chips', 'aria-label': 'Overlays' });
+    const ovlChips = h('ul', { class: 'chip-list sv-ovl-chips', 'aria-label': 'Layers' });
     const ovlRow = h('div', { class: 'sv-ovl-row', hidden: true }, ovlChips,
-      h('label', { class: 'check sv-dim' }, dimInput, 'Dim the coloring under the overlays'));
+      h('label', { class: 'check sv-dim' }, dimInput, 'Dim the coloring under the layers'));
     const controls = h('div', { class: 'sv-panel-controls' },
       h('div', { class: 'sv-control' }, h('label', { for: ids.sample }, 'Section'), sampleSel),
       h('div', { class: 'sv-control' }, h('label', { for: ids.field }, 'Color by'), fieldSel),
       geneCtl,
-      h('div', { class: 'sv-control sv-control-auto' }, h('span', { class: 'sv-control-label' }, 'Overlays'), addBtn));
+      h('div', { class: 'sv-control sv-control-auto' }, h('span', { class: 'sv-control-label' }, 'Layers'), addBtn));
     const canvas = h('canvas', {
       class: 'sv-canvas', tabIndex: 0, role: 'img',
       'aria-label': 'Map of the bins of the section. Drag or use the arrow keys to pan; scroll, + and − to zoom; 0 fits the section.',
@@ -1929,7 +1944,7 @@ export function spatialViewer({ source, store, binUm: binUmOption, emptyText }) 
     }
 
     /**
-     * Tooltip: position, barcode, the counts of the genes shown, the field colored by and the overlays (in bold), the
+     * Tooltip: position, barcode, the counts of the genes shown, the field colored by and the layers (in bold), the
      * other labels and numbers, and the positivity calls that are not shown, on one line (the ones the bin has).
      */
     function tipContent(i) {
@@ -2015,14 +2030,18 @@ export function spatialViewer({ source, store, binUm: binUmOption, emptyText }) 
       return gv && gv.used.length ? gv.used : st.genes;
     }
 
+    /** What the panel shows: its coloring and its layers ('Tissue class + Ctsk, Acp5'; 'Ctsk, Acp5' over no coloring). */
     function shownText() {
       let what;
       if (st.field === GENE_FIELD) what = st.genes.length ? `${geneText(geneNames())} (UMIs)` : 'gene expression';
+      else if (st.field === NONE_FIELD) what = '';
       else what = st.field && data.fields.has(st.field) ? fieldLabel(st.field) : 'bins';
       const n = st.overlays.length;
-      if (n === 1 || n === 2) what += ` + ${st.overlays.map(layerLabel).join(', ')}`;
-      else if (n > 2) what += ` + ${n} overlays`;
-      return what;
+      let layers = '';
+      if (n === 1 || n === 2) layers = st.overlays.map(layerLabel).join(', ');
+      else if (n > 2) layers = `${n} layers`;
+      if (!what) return layers || 'bins (no coloring)';
+      return layers ? `${what} + ${layers}` : what;
     }
 
     function titleText() {
@@ -2037,6 +2056,7 @@ export function spatialViewer({ source, store, binUm: binUmOption, emptyText }) 
 
     function legendTitle() {
       if (st.field === GENE_FIELD) return st.genes.length ? `${geneText(geneNames())} (UMIs)` : 'Gene expression';
+      if (st.field === NONE_FIELD) return 'No coloring';
       return st.field && data.fields.has(st.field) ? fieldLabel(st.field) : 'Bins';
     }
 
@@ -2129,7 +2149,7 @@ export function spatialViewer({ source, store, binUm: binUmOption, emptyText }) 
       if (ovl && ovl.several) {
         items.push(h('li', { class: 'sv-ovl' },
           h('span', { class: 'swatch sv-swatch-ink', style: { background: severalColor() } }),
-          h('span', { class: 'sv-item-label' }, 'In two or more overlays'),
+          h('span', { class: 'sv-item-label' }, 'In two or more layers'),
           h('span', { class: 'sv-item-count' }, fmt.int(ovl.several))));
       }
       const errors = st.overlays.filter((k) => k.startsWith(GENE_OVERLAY)).map((k) => k.slice(GENE_OVERLAY.length))
@@ -2137,9 +2157,9 @@ export function spatialViewer({ source, store, binUm: binUmOption, emptyText }) 
         .map((gk) => retryLine(`${geneText(gk.split(','))}: ${geneErrors.get(gk)}`, () => retryGenes(gk)));
       const notes = layers.filter((l) => l.note).map((l) => h('li', { class: 'sv-warn' }, `${l.label}: ${l.note}`));
       return h('div', { class: 'sv-legend-section' },
-        h('h4', null, 'Overlays'),
+        h('h4', null, 'Layers'),
         layers.some(isGeneLayer) ? h('p', { class: 'sv-hint' }, 'A gene marks the bins detecting it (1 UMI or more).') : null,
-        h('ul', { class: 'sv-ovl-list', title: 'Bins in each overlay (overlap included)' }, items),
+        h('ul', { class: 'sv-ovl-list', title: 'Bins in each layer (overlap included)' }, items),
         notes.length ? h('ul', { class: 'sv-facts' }, notes) : null,
         errors);
     }
@@ -2177,7 +2197,7 @@ export function spatialViewer({ source, store, binUm: binUmOption, emptyText }) 
       if (style) {
         const anyOff = style.legend.some((e) => e.off);
         parts.push(h('div', { class: 'sv-legend-foot' },
-          h('span', null, `${fmt.int(style.shown)} of ${fmt.int(data.valid)} bins shown`),
+          h('span', null, `${fmt.int(shownCount)} of ${fmt.int(data.valid)} bins shown`),
           anyOff ? h('button', { class: 'btn ghost small', type: 'button', onClick: showAll }, 'Show all') : null));
       }
       if (st.overlays.length) parts.push(overlayLegend());
@@ -2230,7 +2250,7 @@ export function spatialViewer({ source, store, binUm: binUmOption, emptyText }) 
         return h('li', { class: bad ? 'chip sv-chip warn' : 'chip sv-chip', title: what, dataset: { key } },
           h('span', { class: 'swatch', style: { background: l ? l.color : 'transparent' } }),
           h('span', { class: 'chip-text' }, label),
-          h('button', { type: 'button', 'aria-label': `Remove the overlay ${label}`, title: 'Remove', onClick: () => removeOverlay(key) },
+          h('button', { type: 'button', 'aria-label': `Remove the layer ${label}`, title: 'Remove', onClick: () => removeOverlay(key) },
             icon('x', { size: 12 })));
       }));
       if (focused >= 0) {
@@ -2321,14 +2341,19 @@ export function spatialViewer({ source, store, binUm: binUmOption, emptyText }) 
         style = gv ? buildGeneStyle(data, gv, new Set(st.hidden[GENE_FIELD] || []), range) : buildStyle(data, null, new Set());
       } else {
         const f = data.fields.get(st.field) || null;
-        style = buildStyle(data, f, new Set(f ? st.hidden[f.key] || [] : []), range);
+        style = buildStyle(data, f, new Set(st.hidden[f ? f.key : st.field] || []), range, st.field === NONE_FIELD);
       }
       ovl = st.overlays.length ? buildOverlays(data, overlayLayers()) : null;
       if (ovl && ovl.groups.length) {
         vis = style.visible.slice();
-        for (let i = 0; i < data.n; i += 1) if (ovl.member[i] >= 0) vis[i] = 1;
+        shownCount = 0;
+        for (let i = 0; i < data.n; i += 1) {
+          if (ovl.member[i] >= 0) vis[i] = 1;
+          shownCount += vis[i];
+        }
       } else {
         vis = style.visible;
+        shownCount = style.shown;
       }
       if (hover >= 0 && !vis[hover]) setHover(-1);
       paintTitle();
@@ -2339,23 +2364,35 @@ export function spatialViewer({ source, store, binUm: binUmOption, emptyText }) 
       measureSoon(); // the overlay row may have come or gone
     }
 
+    /**
+     * "Color by" checked against the section's fields: a yes/no field (calls, region, quality control) is a layer, so
+     * a panel colored by one (a view kept from before, a viewer.show()) shows the same picture as that layer over no
+     * coloring; a field the section lacks gives way to the first default it has (else no coloring).
+     */
     function normalizeField() {
-      if (st.field === GENE_FIELD && hasGenes) return;
-      if (!data.fields.has(st.field)) st.field = DEFAULT_FIELDS.find((k) => data.fields.has(k)) || data.order[0] || '';
+      if ((st.field === GENE_FIELD && hasGenes) || st.field === NONE_FIELD) return;
+      const f = data.fields.get(st.field);
+      if (f && f.type === 'bool') {
+        if (!st.overlays.includes(st.field) && st.overlays.length < MAX_OVERLAYS) st.overlays.push(st.field);
+        // its negative bins hidden (only the positive or passing bins shown): the gray bins hidden, the same picture
+        if (st.hidden && Array.isArray(st.hidden[st.field]) && st.hidden[st.field].includes('no')) st.hidden[NONE_FIELD] = [BASE];
+        st.field = NONE_FIELD;
+        return;
+      }
+      if (!f) st.field = DEFAULT_FIELDS.find((k) => data.fields.has(k)) || data.order.find((k) => data.fields.get(k).type !== 'bool') || NONE_FIELD;
     }
 
+    /** "Color by": no coloring, the labels, the numbers and the genes; the yes/no fields are layers (+ Add layer). */
     function fillFieldSelect() {
       const keysOf = (type) => data.order.filter((k) => data.fields.get(k).type === type);
       const groups = [
         { label: 'Labels', keys: keysOf('category') },
-        { label: 'Region, quality control and calls', keys: keysOf('bool') },
         { label: 'Numbers', keys: keysOf('number') },
       ].filter((g) => g.keys.length);
-      const opts = groups.map((g) => h('optgroup', { label: g.label }, g.keys.map((k) => h('option', { value: k }, fieldLabel(k)))));
+      const opts = [h('option', { value: NONE_FIELD }, 'None (gray)')];
+      opts.push(...groups.map((g) => h('optgroup', { label: g.label }, g.keys.map((k) => h('option', { value: k }, fieldLabel(k))))));
       if (hasGenes) opts.push(h('optgroup', { label: 'Expression' }, h('option', { value: GENE_FIELD }, 'Gene…')));
-      if (!opts.length) opts.push(h('option', { value: '' }, 'Position only'));
       mount(fieldSel, opts);
-      fieldSel.disabled = !groups.length && !hasGenes;
     }
 
     /** Region, quality control and calls (yes/no fields) of the section that are not overlays yet, in field order. */
@@ -2363,7 +2400,7 @@ export function spatialViewer({ source, store, binUm: binUmOption, emptyText }) 
       return data ? data.order.filter((k) => data.fields.get(k).type === 'bool' && !st.overlays.includes(k)) : [];
     }
 
-    /** "+ Add gene" can add something: a gene (when the source has genes) or a yes/no field not shown yet. */
+    /** "+ Add layer" can add something: a gene (when the source has genes) or a yes/no field not shown yet. */
     function paintAddBtn() {
       addBtn.disabled = !hasGenes && !freeBools().length;
     }
@@ -2406,7 +2443,7 @@ export function spatialViewer({ source, store, binUm: binUmOption, emptyText }) 
       restyle();
     }
 
-    // ---- "+ Add gene": a popover with a gene box (Enter or a suggestion adds the genes typed, one overlay each, or one
+    // ---- "+ Add layer": a popover with a gene box (Enter or a suggestion adds the genes typed, one overlay each, or one
     // for genes joined by +) and the yes/no fields not shown yet (a click adds one); either closes it
     function toggleAdd() {
       if (addPop && addPop.pop.isOpen()) addPop.pop.close();
@@ -2450,7 +2487,7 @@ export function spatialViewer({ source, store, binUm: binUmOption, emptyText }) 
       }
       if (!parts.length) return; // nothing to add (a section still loading, every yes/no field shown already)
       const pop = popover(addBtn, parts, {
-        label: hasGenes ? 'Add a gene to this map' : 'Add an overlay to this map', cls: 'sv-add-pop',
+        label: 'Add a layer to this map', cls: 'sv-add-pop',
         onClose: () => {
           if (box) box.destroy();
           if (addPop && addPop.pop === pop) addPop = null;
@@ -2516,7 +2553,7 @@ export function spatialViewer({ source, store, binUm: binUmOption, emptyText }) 
       const at = st.overlays.indexOf(key);
       st.overlays = st.overlays.filter((k) => k !== key);
       overlaysChanged();
-      // the focus goes to the remove button of the chip now in its place (else the one before), else to "+ Add gene"
+      // the focus goes to the remove button of the chip now in its place (else the one before), else to "+ Add layer"
       const btns = ovlChips.querySelectorAll('button');
       const next = btns.length ? btns[Math.min(Math.max(at, 0), btns.length - 1)] : null;
       (next || addBtn).focus();
@@ -2733,7 +2770,8 @@ export function spatialViewer({ source, store, binUm: binUmOption, emptyText }) 
 
     // ---- export
     function fileTag() {
-      const what = st.field === GENE_FIELD ? genesKey(st.genes) || 'genes' : st.field || 'bins';
+      const what = st.field === GENE_FIELD ? genesKey(st.genes) || 'genes'
+        : (st.field === NONE_FIELD ? st.overlays.map(overlayLabel).join('_') || 'bins' : st.field || 'bins');
       return `${st.sample}_${what}`;
     }
 
@@ -2801,7 +2839,7 @@ export function spatialViewer({ source, store, binUm: binUmOption, emptyText }) 
         top += 6;
         g.fillStyle = P.text;
         g.font = `600 12px ${FONT}`;
-        g.fillText('Overlays', x, top, width);
+        g.fillText('Layers', x, top, width);
         top += 20;
         if (ovl.layers.some(isGeneLayer)) {
           g.fillStyle = P.muted;
@@ -2810,7 +2848,7 @@ export function spatialViewer({ source, store, binUm: binUmOption, emptyText }) 
           top += 18;
         }
         for (const l of ovl.layers) swatchRow(l.color, l.label, l.count);
-        if (ovl.several) swatchRow(SEVERAL, 'In two or more overlays', ovl.several);
+        if (ovl.several) swatchRow(SEVERAL, 'In two or more layers', ovl.several);
       }
       g.restore();
     }

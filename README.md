@@ -40,7 +40,7 @@ Without the scripts: `python -m pip install -r requirements.txt`, then `python -
    UMIs, genes and mitochondrial share per bin and the bins that pass the quality control of the Parameters tab; the
    maps show these per-bin numbers or any gene on the H&E image, in one, two or four linked panels; the gene list of
    a section is ranked by UMIs and searchable: click a gene to put it on the map, or its + to add it in its own
-   color, so that several genes show at once (the map's "+ Add gene" button does the same).
+   color, so that several genes show at once (the map's "+ Add layer" button does the same).
 4. **Parameters** and **Signatures**: the defaults are the manuscript setup; every value has a help text and a
    reset button. Gene signatures (Table 1) can be edited, added, renamed or removed (see
    [Using it for other gene groups](#using-it-for-other-gene-groups)).
@@ -49,7 +49,7 @@ Without the scripts: `python -m pip install -r requirements.txt`, then `python -
 6. **Run → Start analysis**. The run page shows each step, the live log, then the summary, figures (PNG/PDF), tables
    (sortable, searchable, downloadable; **Export** at the top downloads all results, the figures or the tables as
    one zip), a spatial viewer of every bin (tissue classes, calls, Leiden domains or any gene; one, two or four
-   linked panels, overlays of calls, region and genes, H&E underneath) and the exact configuration used.
+   linked panels, layers of genes, calls and region, H&E underneath) and the exact configuration used.
 
 Runs, projects and drawn regions are stored in `workspace/` (or `--workspace`, or the `BSS_WORKSPACE` variable).
 Each run keeps a frozen copy of its configuration, so it can be reproduced with **Re-run**.

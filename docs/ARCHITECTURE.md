@@ -386,7 +386,10 @@ GET  /api/runs/{rid}/bins?sample=<sid>
                     "total_umi": {"type": "number", "values": [..]}},
          "colors": {"tissue_class": {name: "#hex"}, "assigned_signature": {slug: "#hex"}}}
      from per_bin_signature_calls_{B}.csv.gz (cached per run); colors from the run's config.json (classes, signatures;
-     "removed" "#b8b8b8", "unassigned"/"ambiguous" "#dedede").
+     "removed" "#b8b8b8", "unassigned"/"ambiguous" "#dedede"). A positive_* column is yes/no only when its values
+     are (booleans, text such as True/False, or numbers all 0 or 1: is_yes_no());
+     positive_fraction_<slug>_pooled_depthmatched_draws (the share of depth-matching draws in which a bin is positive,
+     0 to 1) is always a number, also with one draw (every share 0 or 1).
 GET  /api/runs/{rid}/bins/image?sample=<sid>  -> {"url", "px_per_um", "width", "height"} of the hires H&E image under
      the bins of /bins (as in the explorer, with the run's config.json); 404 when there is none
 GET  /api/runs/{rid}/genes?sample=<sid>&query=&limit=50  -> as POST /explore/{sid}/genes plus "n_unmatched", over the
@@ -495,7 +498,7 @@ navigation, giving the focus back to its button; ↑/↓ on the button open it, 
 the keys to a menu open in a dialog.
 `popover(trigger, content, {label, align, focus, onClose, cls}) -> {el, place(), close({focus}), isOpen()}`: a small
 panel that is not modal (role="dialog", .menu-pop.popover) under its button, for a short form (the spatial viewer's
-"+ Add gene"). It shares the menus' slot (one menu or popover open at a time) and their placing (kept inside the
+"+ Add layer"). It shares the menus' slot (one menu or popover open at a time) and their placing (kept inside the
 window when it fits on neither side of its button) and closing, closes on Escape (focus back on its button; a field
 that uses Escape first, closing its own list, keeps it open), on Tab past its last field (focus on the page's next
 stop after its button) or Shift+Tab before its first (focus on its button), and when the focus leaves it otherwise
@@ -602,24 +605,31 @@ fieldLabel(key) -> display name of a per-bin field
   to load)}. Every method gets an AbortSignal; a 404 from samples() shows the empty state. The run viewer uses
   runSource; the data explorer a source over the /explore endpoints.
 * 1, 2 or 4 panels (2 x 2; one column below 760 px), each with its own section (a new panel shows the first section
-  no panel before it shows), "Color by" (the payload's fields, or "Gene…": the summed counts of one or more genes, 0 in
-  the neutral color, detected bins on viridis with a log(1 + x) scale clamped at the 99th percentile of the nonzero
-  counts; numbers likewise from their smallest value to their 99th percentile, log(1 + x) for UMIs and genes per bin;
-  the color scale starts at viridis' quarter point, so the lowest step is brighter than the neutral color on the dark
-  background), overlays drawn on top (genes, each marking the bins detecting it, so that several genes show on one
-  map, and boolean fields: calls, region of interest, quality control; each in the signature's configured color when
-  free, else a palette color apart from the other overlays and, while one is left, from the colors of the categories
-  or calls the panel is colored by; bins in two or more overlays in the theme's text color, in the dark text color of
-  the exported image over the H&E image and in that image; the coloring under them can be dimmed), a legend with
-  counts and click-to-hide entries, and a title (section + what is shown). Overlays are added with "+ Add gene" (the
-  panel's last control; "Add overlay" without genes), a popover() with a gene box (geneInput, suggestions only once
-  typing; Enter or a suggestion adds the genes typed, one overlay each, 'Ctsk, Acp5', or one for genes joined by +,
-  'Ctsk + Acp5' = the bins detecting any of them) and the boolean fields not shown yet (a click adds one). An overlay
-  asked for again (any case) flashes its chip instead; at most 11 per panel (one palette color each; viewer.show() adds
-  no more either, with the same warning). Each overlay is a chip under the
-  controls (its color, its name, a remove button; marked when its genes are not in the data or failed to load), with
-  "Dim the coloring under the overlays" beside them. A gene overlay typed in another case takes the data's names once
-  its counts are there ('ctsk' -> 'Ctsk'). Adding, removing or renaming overlays dispatches a bubbling "sv-change"
+  no panel before it shows) and two parts: "Color by", the base map, and layers on top.
+  "Color by": "None (gray)" (every bin in the neutral color, under layers; its one legend entry "Every bin (gray)"
+  hides them like any legend entry, which leaves the layers alone, e.g. only the bins passing QC over the H&E image;
+  the legend's "x of y bins shown" counts the bins of the coloring and of the layers), the labels (category fields), the
+  numbers (number fields), or "Gene…": the summed counts of one or more genes, 0 in the neutral color, detected bins
+  on viridis with a log(1 + x) scale clamped at the 99th percentile of the nonzero counts; numbers likewise from their
+  smallest value to their 99th percentile, log(1 + x) for UMIs and genes per bin; the color scale starts at viridis'
+  quarter point, so the lowest step is brighter than the neutral color on the dark background. The yes/no fields are
+  not in it: they are layers. A panel colored by one (a view kept from before, or viewer.show({field})) shows that
+  field as a layer over no coloring, the same picture (its negatives hidden: the gray bins hidden).
+  Layers (the panel's "overlays" in the store and the code): genes, each marking the bins detecting it, so that
+  several genes show on one map, and boolean fields: calls, region of interest, quality control; each in the
+  signature's configured color when free, else a palette color apart from the other layers and, while one is left,
+  from the colors of the categories the panel is colored by; bins in two or more layers in the theme's text color, in
+  the dark text color of the exported image over the H&E image and in that image; the coloring under them can be
+  dimmed. A legend with counts and click-to-hide entries, and a title (section + what is shown: 'Tissue class + Ctsk,
+  Acp5', or the layers alone over no coloring). Layers are added with "+ Add layer" (the panel's last control, under
+  the label "Layers"), a popover() with a gene box (geneInput, suggestions only once typing; Enter or a suggestion
+  adds the genes typed, one layer each, 'Ctsk, Acp5', or one for genes joined by +, 'Ctsk + Acp5' = the bins
+  detecting any of them) and the boolean fields not shown yet (a click adds one). A layer asked for again (any case)
+  flashes its chip instead; at most 11 per panel (one palette color each; viewer.show() adds no more either, with the
+  same warning). Each layer is a chip under the controls (its color, its name, a remove button; marked when its genes
+  are not in the data or failed to load), with "Dim the coloring under the layers" beside them. A gene layer typed in
+  another case takes the data's names once its counts are there ('ctsk' -> 'Ctsk'). Adding, removing or renaming
+  layers dispatches a bubbling "sv-change"
   event from the panel (the popover lives outside the viewer's element). "Color scales: Shared" (default on): panels colored by
   the same genes or the same number use one range (the smallest low end, the largest 99th percentile), the legend
   says whose range it shows. Pan and zoom are linked by default (one view in µm for all panels, with a crosshair at
@@ -635,7 +645,7 @@ fieldLabel(key) -> display name of a per-bin field
   measured on its own, and a map is at least 200 px high); with
   two or four panels the maps of a row line up (the panels share the rows of a CSS subgrid), the controls of a panel
   sit on one line, and a wide panel (500 px with four panels, 700 px with two) has its legend in a 180 px column
-  beside the map (an entry's count under its label), else under it. The tooltip of a bin (barcode, genes shown, the field colored by and the overlays in
+  beside the map (an entry's count under its label), else under it. The tooltip of a bin (barcode, genes shown, the field colored by and the layers in
   bold, the other fields, the remaining positivity calls on one line) is placed in the window beside the pointer, or
   above or below it, never cut by the panel.
 * store (kept by the caller between visits): layout, link, sameScale, view (linked), pointSize, image {on, opacity},
@@ -671,15 +681,15 @@ dataExplorer({projectId, name, state, getConfig, focus, onOpenData}) -> {el, des
   outline, the section of the gene table, the active row of the sections table and the gene rows in step with it; it
   runs once the viewer is mounted (on every visit: with sections known from an earlier visit the viewer makes its
   panels at once), when panels are made or removed (a MutationObserver), after a press, key, focus or change in the
-  viewer, on its "sv-change" event (overlays added from "+ Add gene" or renamed; the highlighted panel stays) and after each viewer.show() from the
+  viewer, on its "sv-change" event (layers added from "+ Add layer" or renamed; the highlighted panel stays) and after each viewer.show() from the
   explorer (section rows, gene rows, a section opened from the Data tab). Gene table: the section's genes by UMIs
   (POST /genes, case-insensitive filter, 50 / 200 / 500 rows) with UMIs, bins detecting the gene and their share. A
   click in a gene row (rowAction(), as in the sections table; the gene name is the row's button) =
   viewer.show({panel, sample, genes: [gene]}); the row is marked and its name pressed (aria-pressed) while the
   highlighted panel is colored by that gene alone. The + toggle at the end of the row (.btn.toggle, icon-only, in
-  .row-actions) adds 'gene:<gene>' to the panel's overlays, on top of its coloring, or removes it: pressed
-  (aria-pressed, its icon a check mark) and kept visible (.keep) while the highlighted panel has it; its aria-label "Show <gene> as an
-  overlay" is the same in both states, its title says what a click does. The rows follow the coloring and the
+  .row-actions) adds 'gene:<gene>' to the panel's layers (overlays), on top of its coloring, or removes it: pressed
+  (aria-pressed, its icon a check mark) and kept visible (.keep) while the highlighted panel has it; its aria-label "Show <gene> as a
+  layer" is the same in both states, its title says what a click does. The rows follow the coloring and the
   overlays of the highlighted panel however they change, updated in place (a focused button keeps the focus). Below
   760 px the count of bins detecting the gene is left out (the share stays, its title gives the count). A "Gene
   table" jump above the map (with four panels, and below 760 px where the panels stack) scrolls to the gene table and

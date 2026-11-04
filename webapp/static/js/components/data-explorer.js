@@ -491,8 +491,8 @@ export function dataExplorer({ projectId, name = '', state: st, getConfig, focus
   }
 
   // a press, a focus or a change inside a panel makes it the highlighted one; layout buttons, section menus and the
-  // gene boxes (Enter, or the mousedown of a suggestion, adds an overlay) are handled by the viewer first (bubbling),
-  // so the store is current here
+  // gene box of Color by (Enter, or the mousedown of a suggestion, shows the genes) are handled by the viewer first
+  // (bubbling), so the store is current here
   function onViewerEvent(e) {
     const panel = e.target instanceof Element ? e.target.closest('.sv-panel') : null;
     const i = panel ? panelEls().indexOf(panel) : -1;
@@ -561,8 +561,8 @@ export function dataExplorer({ projectId, name = '', state: st, getConfig, focus
       observer.observe(panelsEl, { childList: true });
     }
     for (const type of ['pointerdown', 'mousedown', 'keydown', 'focusin', 'click', 'change']) viewer.el.addEventListener(type, onViewerEvent);
-    // overlays added from a panel's "+ Add gene" popover (outside the viewer's element) or renamed once loaded: the gene
-    // rows follow, the highlighted panel stays (the press on "+ Add gene" chose it)
+    // layers added from a panel's "+ Add layer" popover (outside the viewer's element) or renamed once loaded: the gene
+    // rows follow, the highlighted panel stays (the press on "+ Add layer" chose it)
     viewer.el.addEventListener('sv-change', () => markTarget());
     geneCard.classList.remove('hidden');
     geneJump.classList.remove('hidden');
@@ -617,7 +617,7 @@ export function dataExplorer({ projectId, name = '', state: st, getConfig, focus
   /**
    * A gene row. A click anywhere in it colors the highlighted panel by the gene: its name is the row's button for the
    * keyboard (pressed while the panel shows the gene alone). The + toggle at its end adds or removes the gene's
-   * overlay (the gene in its own color on the bins detecting it, as "+ Add gene" of the panel does); it shows while
+   * layer (the gene in its own color on the bins detecting it, as "+ Add layer" of the panel does); it shows while
    * the row is hovered or focused, and stays, as a check mark, while the overlay is there. The toggle keeps its name in
    * both states (its state is aria-pressed, its title says what a click does). paintGeneRow() writes what depends on
    * the highlighted panel.
@@ -627,7 +627,7 @@ export function dataExplorer({ projectId, name = '', state: st, getConfig, focus
     const show = h('button', { class: 'dx-row-btn dx-gene-btn', type: 'button', 'aria-pressed': 'false' }, gene);
     const toggle = h('button', {
       class: 'btn small ghost icon-only toggle', type: 'button',
-      'aria-label': `Show ${gene} as an overlay`, 'aria-pressed': 'false',
+      'aria-label': `Show ${gene} as a layer`, 'aria-pressed': 'false',
       onClick: (e) => {
         e.stopPropagation(); // the overlay only: the row's click would also color the map by the gene
         toggleGeneOverlay(gene);
@@ -714,7 +714,7 @@ export function dataExplorer({ projectId, name = '', state: st, getConfig, focus
           h('th', { class: 'num', title: 'UMIs of the gene in the whole section' }, 'UMIs'),
           h('th', { class: 'num dx-col-bins', title: 'Bins with at least one UMI of the gene' }, 'Bins detecting it'),
           h('th', { title: 'Share of the bins of the section that detect the gene' }, '% of bins'),
-          h('th', null, h('span', { class: 'sr-only' }, 'Overlay')))),
+          h('th', null, h('span', { class: 'sr-only' }, 'Layer')))),
         h('tbody', null, genes.map(geneRow)))),
       more ? h('div', { class: 'row' }, more) : null);
     paintGeneRows();
