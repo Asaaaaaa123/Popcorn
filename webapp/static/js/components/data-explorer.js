@@ -561,6 +561,9 @@ export function dataExplorer({ projectId, name = '', state: st, getConfig, focus
       observer.observe(panelsEl, { childList: true });
     }
     for (const type of ['pointerdown', 'mousedown', 'keydown', 'focusin', 'click', 'change']) viewer.el.addEventListener(type, onViewerEvent);
+    // overlays added from a panel's "+ Add gene" popover (outside the viewer's element) or renamed once loaded: the gene
+    // rows follow, the highlighted panel stays (the press on "+ Add gene" chose it)
+    viewer.el.addEventListener('sv-change', () => markTarget());
     geneCard.classList.remove('hidden');
     geneJump.classList.remove('hidden');
     markTarget(); // panels the viewer made at once (sections known from an earlier visit) came before the observer
@@ -571,8 +574,8 @@ export function dataExplorer({ projectId, name = '', state: st, getConfig, focus
     if (destroyed) return;
     geneTitle.textContent = geneSid ? `Genes of ${sectionText(geneSid)}` : 'Genes';
     geneSub.textContent = panelCount() > 1
-      ? 'Ranked by UMIs in the section of the highlighted panel (click a panel to choose it). Click a gene to color that panel by it; the layers button at the end of its row adds it as an overlay on top of the current coloring (click it again to remove the overlay).'
-      : 'Ranked by UMIs in the section on the map. Click a gene to color the map by it; the layers button at the end of its row adds it as an overlay on top of the current coloring (click it again to remove the overlay).';
+      ? 'Ranked by UMIs in the section of the highlighted panel (click a panel to choose it). Click a gene to color that panel by it; the + at the end of its row adds it to the panel in its own color, on top of the current coloring, so that several genes show at once (click it again to remove it).'
+      : 'Ranked by UMIs in the section on the map. Click a gene to color the map by it; the + at the end of its row adds it to the map in its own color, on top of the current coloring, so that several genes show at once (click it again to remove it).';
   }
 
   const searchSoon = debounce(() => searchGenes(), 250);
@@ -613,10 +616,11 @@ export function dataExplorer({ projectId, name = '', state: st, getConfig, focus
 
   /**
    * A gene row. A click anywhere in it colors the highlighted panel by the gene: its name is the row's button for the
-   * keyboard (pressed while the panel shows the gene alone). The layers toggle at its end adds or removes the gene's
-   * "detected" overlay; it shows while the row is hovered or focused, and stays while the overlay is there. The toggle
-   * keeps its name in both states (its state is aria-pressed, its title says what a click does). paintGeneRow() writes
-   * what depends on the highlighted panel.
+   * keyboard (pressed while the panel shows the gene alone). The + toggle at its end adds or removes the gene's
+   * overlay (the gene in its own color on the bins detecting it, as "+ Add gene" of the panel does); it shows while
+   * the row is hovered or focused, and stays, as a check mark, while the overlay is there. The toggle keeps its name in
+   * both states (its state is aria-pressed, its title says what a click does). paintGeneRow() writes what depends on
+   * the highlighted panel.
    */
   function geneRow(g) {
     const gene = String(g.gene);
@@ -628,7 +632,7 @@ export function dataExplorer({ projectId, name = '', state: st, getConfig, focus
         e.stopPropagation(); // the overlay only: the row's click would also color the map by the gene
         toggleGeneOverlay(gene);
       },
-    }, icon('layers', { size: 14 }));
+    }, icon('plus', { size: 14 }));
     const actions = h('span', { class: 'row-actions' }, toggle);
     const tr = h('tr', null,
       h('td', { class: 'mono dx-gene' }, show),
@@ -651,8 +655,11 @@ export function dataExplorer({ projectId, name = '', state: st, getConfig, focus
     tr.classList.toggle('dx-on-map', shown);
     show.setAttribute('aria-pressed', String(shown));
     show.title = `Color ${at} by the UMIs of ${gene}`;
-    toggle.setAttribute('aria-pressed', String(on));
-    toggle.title = on ? `Remove the ${gene} overlay from ${at}` : `Add ${gene} as an overlay on ${at}`;
+    if (toggle.getAttribute('aria-pressed') !== String(on)) {
+      toggle.setAttribute('aria-pressed', String(on));
+      mount(toggle, icon(on ? 'check' : 'plus', { size: 14 }));
+    }
+    toggle.title = on ? `Remove ${gene} from ${at}` : `Add ${gene} to ${at} in its own color`;
     actions.classList.toggle('keep', on);
   }
 

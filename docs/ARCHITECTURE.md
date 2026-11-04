@@ -481,7 +481,7 @@ printed with the URL); requests carry it as cookie `bss_token` (set by visiting 
 
 ## 7. Front end (webapp/static, ES modules, no framework, no network dependencies)
 `core.js` (already written — read it) provides: api(), apiUrl(), ApiError, h(), svg(), mount(), clear(), icon(),
-button(), menuButton(), card(), field(), switchToggle(), tabs(), statusBadge(), loading(), emptyState(), errorPanel(),
+button(), menuButton(), popover(), card(), field(), switchToggle(), tabs(), statusBadge(), loading(), emptyState(), errorPanel(),
 banner(), toast(), modal(), confirmDialog(), promptDialog(), fmt.{int,num,pct,bytes,duration,date,ago}, debounce(),
 sleep(), poll(), copyText(), clone(), state.health, refreshHealth(), route(), navigate(), setPathSilently(),
 currentPath().
@@ -493,12 +493,20 @@ the ghost icon-only "More actions" button (aria-label = title), with one a butto
 time; it follows its button while the page scrolls and closes on a choice, Escape, Tab, a click elsewhere, a resize or
 navigation, giving the focus back to its button; ↑/↓ on the button open it, ↑/↓/Home/End move in it; modal() leaves
 the keys to a menu open in a dialog.
+`popover(trigger, content, {label, align, focus, onClose, cls}) -> {el, place(), close({focus}), isOpen()}`: a small
+panel that is not modal (role="dialog", .menu-pop.popover) under its button, for a short form (the spatial viewer's
+"+ Add gene"). It shares the menus' slot (one menu or popover open at a time) and their placing (kept inside the
+window when it fits on neither side of its button) and closing, closes on Escape (focus back on its button; a field
+that uses Escape first, closing its own list, keeps it open), on Tab past its last field (focus on the page's next
+stop after its button) or Shift+Tab before its first (focus on its button), and when the focus leaves it otherwise
+(a click in another field); it focuses its first field on opening. The caller
+sets aria-haspopup="dialog" on the button and toggles it with isOpen()/close().
 Convention for secondary and destructive actions (move, remove, duplicate, delete, reset): a menuButton, or
 `.row-actions`, a span in a table row or list item shown only while the row (tr, li, .has-row-actions) is hovered or
 holds the focus (always on touch screens, and while its menu is open; `.keep` keeps it shown, e.g. while a toggle in
 it is on). A row or card that opens something on click keeps a real link or button for the keyboard.
 `css/app.css` (already written — read it) defines the design system: .page, .page-header, .card, .btn (primary,
-danger, ghost, ghost.danger, small, icon-only, toggle[aria-pressed]), .menu-pop/.menu-item (menuButton), .row-actions,
+danger, ghost, ghost.danger, small, icon-only, toggle[aria-pressed]), .menu-pop/.menu-item (menuButton), .menu-pop.popover (popover), .row-actions,
 .input/.select/.textarea, .field, .form-grid, .switch, .tabs, .badge(-status), .chip(.ok/.warn/.bad/.core),
 .table-wrap/.table, .kv, .metric, .progress, .log, .banner, .modal, .toast, .empty, .grid-2/.grid-3/.grid-auto, .row,
 .stack, .legend, .prose. Use them; put view-specific rules in css/project.css
@@ -583,7 +591,8 @@ Components live in js/components/ and are imported by the views.
 ```
 spatialViewer({source, store, binUm, emptyText}) -> {el, destroy(), show({panel?, sample?, field?, genes?, overlays?})}
 runSource(runId) -> source        the Viewer tab of a run (GET /bins/samples, /bins, /genes, /bins/image; POST /gene)
-geneInput({id, label, placeholder, submitLabel, search, onSubmit, onCancel}) -> {el, input, set, focus, destroy}
+geneInput({id, label, placeholder, submitLabel, search, onSubmit, onCancel, suggestOnFocus}) -> {el, input, set, focus, destroy}
+                                  onSubmit(names, text typed); commas, spaces or + separate the names
 fieldLabel(key) -> display name of a per-bin field
 ```
 * source = {name?, emptyText?, samples(signal) -> [{id, label, n}], bins(sampleId, signal) -> bin payload (the shape
@@ -597,11 +606,21 @@ fieldLabel(key) -> display name of a per-bin field
   the neutral color, detected bins on viridis with a log(1 + x) scale clamped at the 99th percentile of the nonzero
   counts; numbers likewise from their smallest value to their 99th percentile, log(1 + x) for UMIs and genes per bin;
   the color scale starts at viridis' quarter point, so the lowest step is brighter than the neutral color on the dark
-  background), overlays (boolean fields and "detected: <genes>"; each in the signature's configured color when free,
-  else a palette color apart from the other overlays and, while one is left, from the colors of the categories or
-  calls the panel is colored by; bins in two or more overlays in the theme's text color, in the dark text color of the exported
-  image over the H&E image and in that image; the coloring under them can be dimmed), a legend with counts and
-  click-to-hide entries, and a title (section + what is shown). "Color scales: Shared" (default on): panels colored by
+  background), overlays drawn on top (genes, each marking the bins detecting it, so that several genes show on one
+  map, and boolean fields: calls, region of interest, quality control; each in the signature's configured color when
+  free, else a palette color apart from the other overlays and, while one is left, from the colors of the categories
+  or calls the panel is colored by; bins in two or more overlays in the theme's text color, in the dark text color of
+  the exported image over the H&E image and in that image; the coloring under them can be dimmed), a legend with
+  counts and click-to-hide entries, and a title (section + what is shown). Overlays are added with "+ Add gene" (the
+  panel's last control; "Add overlay" without genes), a popover() with a gene box (geneInput, suggestions only once
+  typing; Enter or a suggestion adds the genes typed, one overlay each, 'Ctsk, Acp5', or one for genes joined by +,
+  'Ctsk + Acp5' = the bins detecting any of them) and the boolean fields not shown yet (a click adds one). An overlay
+  asked for again (any case) flashes its chip instead; at most 11 per panel (one palette color each; viewer.show() adds
+  no more either, with the same warning). Each overlay is a chip under the
+  controls (its color, its name, a remove button; marked when its genes are not in the data or failed to load), with
+  "Dim the coloring under the overlays" beside them. A gene overlay typed in another case takes the data's names once
+  its counts are there ('ctsk' -> 'Ctsk'). Adding, removing or renaming overlays dispatches a bubbling "sv-change"
+  event from the panel (the popover lives outside the viewer's element). "Color scales: Shared" (default on): panels colored by
   the same genes or the same number use one range (the smallest low end, the largest 99th percentile), the legend
   says whose range it shows. Pan and zoom are linked by default (one view in µm for all panels, with a crosshair at
   the hovered position in the others); unlinked, each panel keeps its own view per section. The H&E image
@@ -652,14 +671,14 @@ dataExplorer({projectId, name, state, getConfig, focus, onOpenData}) -> {el, des
   outline, the section of the gene table, the active row of the sections table and the gene rows in step with it; it
   runs once the viewer is mounted (on every visit: with sections known from an earlier visit the viewer makes its
   panels at once), when panels are made or removed (a MutationObserver), after a press, key, focus or change in the
-  viewer (its gene boxes add overlays on Enter or a suggestion's mousedown) and after each viewer.show() from the
+  viewer, on its "sv-change" event (overlays added from "+ Add gene" or renamed; the highlighted panel stays) and after each viewer.show() from the
   explorer (section rows, gene rows, a section opened from the Data tab). Gene table: the section's genes by UMIs
   (POST /genes, case-insensitive filter, 50 / 200 / 500 rows) with UMIs, bins detecting the gene and their share. A
   click in a gene row (rowAction(), as in the sections table; the gene name is the row's button) =
   viewer.show({panel, sample, genes: [gene]}); the row is marked and its name pressed (aria-pressed) while the
-  highlighted panel is colored by that gene alone. The layers toggle at the end of the row (.btn.toggle, icon-only, in
+  highlighted panel is colored by that gene alone. The + toggle at the end of the row (.btn.toggle, icon-only, in
   .row-actions) adds 'gene:<gene>' to the panel's overlays, on top of its coloring, or removes it: pressed
-  (aria-pressed) and kept visible (.keep) while the highlighted panel has it; its aria-label "Show <gene> as an
+  (aria-pressed, its icon a check mark) and kept visible (.keep) while the highlighted panel has it; its aria-label "Show <gene> as an
   overlay" is the same in both states, its title says what a click does. The rows follow the coloring and the
   overlays of the highlighted panel however they change, updated in place (a focused button keeps the focus). Below
   760 px the count of bins detecting the gene is left out (the share stays, its title gives the count). A "Gene

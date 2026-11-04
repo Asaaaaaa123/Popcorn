@@ -39,8 +39,8 @@ Without the scripts: `python -m pip install -r requirements.txt`, then `python -
    with the settings as they are (saved or not). A table gives the bins, genes and UMIs of each section, the median
    UMIs, genes and mitochondrial share per bin and the bins that pass the quality control of the Parameters tab; the
    maps show these per-bin numbers or any gene on the H&E image, in one, two or four linked panels; the gene list of
-   a section is ranked by UMIs and searchable: click a gene to put it on the map, or its layers button to add it as
-   an overlay.
+   a section is ranked by UMIs and searchable: click a gene to put it on the map, or its + to add it in its own
+   color, so that several genes show at once (the map's "+ Add gene" button does the same).
 4. **Parameters** and **Signatures**: the defaults are the manuscript setup; every value has a help text and a
    reset button. Gene signatures (Table 1) can be edited, added, renamed or removed (see
    [Using it for other gene groups](#using-it-for-other-gene-groups)).

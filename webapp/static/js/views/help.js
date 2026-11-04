@@ -53,7 +53,7 @@ const workflow = () => [
   {
     title: 'Look at the raw data',
     body: [
-      'The ', h('em', null, 'Explore'), ' tab reads every section as Space Ranger wrote it, with the current settings (saved or not) and before any run: a table of the bins, genes and UMIs of each section, the median UMIs, genes and mitochondrial share per bin, and how many bins pass the quality control set under Parameters; maps of these per-bin numbers or of any gene (several are summed), in one, two or four linked panels with the H&E image underneath; and the genes of a section ranked by UMIs, where a click on a gene colors the map by it and the layers button at the end of its row adds it as an overlay. In the Data tab, the bin count of a section opens it there.',
+      'The ', h('em', null, 'Explore'), ' tab reads every section as Space Ranger wrote it, with the current settings (saved or not) and before any run: a table of the bins, genes and UMIs of each section, the median UMIs, genes and mitochondrial share per bin, and how many bins pass the quality control set under Parameters; maps of these per-bin numbers or of any gene (several are summed), in one, two or four linked panels with the H&E image underneath; and the genes of a section ranked by UMIs, where a click on a gene colors the map by it and the + at the end of its row adds it in its own color, so that several genes show on one map. In the Data tab, the bin count of a section opens it there.',
     ],
   },
   {
@@ -86,7 +86,7 @@ const workflow = () => [
       'The ', h('em', null, 'Export'), ' menu at the top of a run downloads all results, the figures or the tables as one zip file, or ', h('em', null, 'Loupe Browser'),
       ': the per-bin calls as category files for 10x Genomics Loupe Browser — the ', code('_008um'),
       ' file of a section goes into its ', code('outs/cloupe_008um.cloupe'), ', and README.txt in the zip says how to import it. ',
-      h('em', null, 'Spatial viewer'), ': every bin at its position, colored by tissue class, assigned signature, Leiden domain, region of interest, a positivity call, the UMI count or the counts of any genes (numbers and counts are colored up to their 99th percentile, marked ≥ in the legend, so that a few extreme bins do not flatten the map); one, two or four panels side by side with linked pan and zoom and, for panels colored by the same gene or number, one shared color scale (Color scales → Shared); yes/no overlays (calls, region of interest, “gene detected”) on top and the H&E image underneath.',
+      h('em', null, 'Spatial viewer'), ': every bin at its position, colored by tissue class, assigned signature, Leiden domain, region of interest, a positivity call, the UMI count or the counts of any genes (numbers and counts are colored up to their 99th percentile, marked ≥ in the legend, so that a few extreme bins do not flatten the map); one, two or four panels side by side with linked pan and zoom and, for panels colored by the same gene or number, one shared color scale (Color scales → Shared); overlays on top, added with + Add gene: genes, each in its own color on the bins detecting it, so that several genes show on one map (type Ctsk, Acp5 for two colors, or Ctsk + Acp5 for one color for the bins detecting either), and calls or the region of interest; the H&E image underneath.',
     ],
   },
   {
@@ -129,7 +129,7 @@ const SHORTCUTS = [
   ['Rows, cards and menus', 'Click a project card, a run or a gene to open it (or show it on the map). Less frequent actions (Duplicate, Delete, Move up, Remove …) are in the ⋯ menu of the row or page, which appears when the pointer is over the row or the keyboard focus is in it; in a menu, ↑ and ↓ move, Enter picks, Esc closes.'],
   ['Figures', 'Click a figure to enlarge it; ← and → step through the figures, a click on the image switches between fitting the window and actual size, Esc closes.'],
   ['Tables', 'Click a column header to sort (again to reverse); the search box filters every column; Esc clears it.'],
-  ['Maps (Spatial viewer, Explore)', 'Drag to pan, scroll or double-click to zoom (Shift + double-click zooms out); with a map focused, the arrow keys pan, + and − zoom and 0 fits the section (every panel’s section while the views are linked). Click a legend entry to hide or show it, Alt + click to show only that entry. In a gene box, ↑ and ↓ pick a suggestion and Enter shows it; commas separate genes whose counts are summed.'],
+  ['Maps (Spatial viewer, Explore)', 'Drag to pan, scroll or double-click to zoom (Shift + double-click zooms out); with a map focused, the arrow keys pan, + and − zoom and 0 fits the section (every panel’s section while the views are linked). Click a legend entry to hide or show it, Alt + click to show only that entry. In a gene box, ↑ and ↓ pick a suggestion and Enter shows or adds it. Under Color by → Gene…, several genes (Ctsk, Acp5) are summed into one coloring; in + Add gene, each gene gets its own color (Ctsk, Acp5) and genes joined by + share one (Ctsk + Acp5); Esc closes the suggestions, then the popover, and ↑ and ↓ move through its list of calls.'],
   ['Log', 'The log follows new output until you scroll up; “Jump to latest” returns to the end.'],
 ];
 

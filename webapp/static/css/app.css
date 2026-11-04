@@ -263,6 +263,9 @@ main#view { flex: 1 1 auto; min-width: 0; }
 .menu-sep { height: 1px; margin: 5px 4px; background: var(--border); }
 .menu-heading { padding: 7px 10px 3px; color: var(--text-faint); font-size: 10.5px; font-weight: 650; letter-spacing: 0.07em; text-transform: uppercase; }
 @keyframes menu-in { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
+/* popover (core.js popover()): a short form under its button, placed and closed like a menu; what it holds may reach
+   past its edges (a list of suggestions) */
+.menu-pop.popover { width: 330px; padding: 12px; overflow: visible; }
 
 /* secondary buttons of a table row or list item: shown while the row is hovered or holds the focus (any of its links,
    fields or buttons; always on touch screens); a row whose action is on (e.g. a pressed toggle) keeps it visible with

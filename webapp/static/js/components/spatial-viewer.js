@@ -1,6 +1,7 @@
 // spatial-viewer.js — the spatial viewer: every bin of a section drawn at its position (x, y in µm, y down, equal
-// aspect), colored by a label, a call, a number or the summed UMI counts of genes, with yes/no layers (positivity calls,
-// region of interest, "gene detected") drawn on top and the H&E image underneath. One, two or four panels side by side,
+// aspect), colored by a label, a call, a number or the summed UMI counts of genes, with overlays drawn on top (genes,
+// each in its own color where it is detected, added with the "+ Add gene" button; positivity calls, region of
+// interest) and the H&E image underneath. One, two or four panels side by side,
 // each with its own section and coloring; pan and zoom are linked across the panels (toggle), and the position under
 // the mouse shows as a crosshair in the other panels. Used by the Viewer tab of a run (runSource below) and by the data
 // explorer of a project (a projectSource on the same interface).
@@ -36,7 +37,7 @@
 //   prepared counts, the last 40 used), images (Map sample -> loaded H&E | {none: true}).
 // Bins are drawn into one offscreen layer per panel (one fillRect batch per color) only when the data, the zoom or the
 // style change; panning and hovering only copy the layers, so four panels of 100,000 bins or more stay smooth.
-import { h, api, mount, icon, emptyState, errorPanel, loading, fmt, toast, debounce, switchToggle } from '../core.js';
+import { h, api, mount, icon, emptyState, errorPanel, loading, fmt, toast, debounce, switchToggle, popover } from '../core.js';
 import { downloadBlob } from './log-view.js';
 import { formatNumber } from './table-viewer.js';
 import { parseTokens } from './chips.js';
@@ -80,6 +81,9 @@ const ZERO = '__zero__'; // legend key of bins where none of the genes is detect
 const GENE_FIELD = '__gene__'; // "Color by" value of the gene coloring
 const GENE_OVERLAY = 'gene:'; // overlay key prefix: 'gene:Ctsk,Acp5' = bins where the summed count is above 0
 const MAX_GENES = 50;
+const MAX_OVERLAYS = OVERLAY_PALETTE.length; // per panel: one palette color each (11), still told apart
+const LOADING = 'loading…'; // status of a gene overlay whose counts are on their way
+const isGeneLayer = (l) => l.key.startsWith(GENE_OVERLAY);
 const GENE_CACHE = 40;
 const DIM = 0.72; // share of the background mixed into the coloring under overlays
 const LAYOUTS = [1, 2, 4];
@@ -169,23 +173,48 @@ function boolText(key) {
   return key.startsWith('positive_') ? ['Positive', 'Negative'] : ['Yes', 'No'];
 }
 
+/** Name of an overlay as stored: its gene names ('Ctsk', 'Ctsk + Acp5') or the label of its yes/no field. */
 function overlayLabel(key) {
-  return key.startsWith(GENE_OVERLAY) ? `Detected: ${geneText(key.slice(GENE_OVERLAY.length).split(','))}` : fieldLabel(key);
+  return key.startsWith(GENE_OVERLAY) ? geneText(key.slice(GENE_OVERLAY.length).split(',')) : fieldLabel(key);
 }
 
-/** Gene names of typed text (commas, semicolons or spaces separate), case-insensitive duplicates dropped. */
+/** Gene names of typed text (commas, semicolons, spaces or + separate), case-insensitive duplicates dropped. */
 function parseGenes(text) {
   const seen = new Set();
   const out = [];
-  for (const t of parseTokens(text)) {
+  for (const t of parseTokens(String(text ?? '').replace(/\+/g, ' '))) {
     const k = t.toLowerCase();
     if (!seen.has(k)) { seen.add(k); out.push(t); }
   }
   return out;
 }
 
-/** Changes of a panel state from viewer.show(): {sample?, field?, genes? (array or text), overlays?}. */
-function patchState(st, patch) {
+/** The same genes whatever their case and order: 'Acp5,Ctsk' for Ctsk + acp5. */
+const foldGenes = (genes) => genes.map((g) => g.toLowerCase()).sort().join(',');
+
+/**
+ * Gene overlays of typed text: one per gene (commas, semicolons or spaces separate), and one for genes joined by +
+ * (the bins detecting any of them): 'Ctsk, Acp5 + Mmp9' -> [['Ctsk'], ['Acp5', 'Mmp9']]. Case-insensitive duplicates
+ * dropped; at most MAX_GENES genes in one overlay.
+ */
+function parseGeneLayers(text) {
+  const seen = new Set();
+  const out = [];
+  for (const tok of parseTokens(String(text ?? '').replace(/\s*\+\s*/g, '+'))) {
+    const genes = parseGenes(tok).slice(0, MAX_GENES);
+    const k = foldGenes(genes);
+    if (!genes.length || seen.has(k)) continue;
+    seen.add(k);
+    out.push(genes);
+  }
+  return out;
+}
+
+/**
+ * Changes of a panel state from viewer.show(): {sample?, field?, genes? (array or text), overlays?}. Overlays the panel
+ * has stay; new ones are added up to MAX_OVERLAYS, the others pushed to `dropped`.
+ */
+function patchState(st, patch, dropped = []) {
   if (patch.sample !== undefined && patch.sample !== null) st.sample = String(patch.sample);
   const genes = typeof patch.genes === 'string' ? parseGenes(patch.genes)
     : Array.isArray(patch.genes) ? parseGenes(patch.genes.join(',')) : null;
@@ -195,8 +224,22 @@ function patchState(st, patch) {
   } else if (typeof patch.field === 'string') {
     st.field = patch.field;
   }
-  if (Array.isArray(patch.overlays)) st.overlays = [...new Set(patch.overlays.map(String))];
+  if (Array.isArray(patch.overlays)) {
+    const had = Array.isArray(st.overlays) ? st.overlays : [];
+    const next = [];
+    for (const k of new Set(patch.overlays.map(String))) {
+      if (had.includes(k) || next.length < MAX_OVERLAYS) next.push(k);
+      else dropped.push(k);
+    }
+    st.overlays = next;
+  }
   return st;
+}
+
+/** The warning when overlays were not added: a panel has at most MAX_OVERLAYS. */
+function tooManyOverlays(keys) {
+  const names = keys.map(overlayLabel).join(', ');
+  toast(`A panel shows at most ${MAX_OVERLAYS} overlays (one color each)${names ? `; not added: ${names}` : ': remove one to add another'}.`, 'warning');
 }
 
 function normalizeSamples(res) {
@@ -768,13 +811,16 @@ function fetchImage(url, signal) {
 
 // ------------------------------------------------------------------------------------------------ gene box
 /**
- * Text box for gene names with suggestions: names separated by commas (or spaces); the last one is completed from
+ * Text box for gene names with suggestions: names separated by commas, spaces or +; the last one is completed from
  * search(query, signal) -> [{gene, total_umi, pct_bins_detected}] (debounced, stale requests aborted; an empty query
- * lists the most abundant genes). ↑ / ↓ pick a suggestion, Enter or a click takes it and submits, Enter alone (or the
- * button) submits onSubmit(names), Esc closes the list (then calls onCancel when given).
+ * lists the most abundant genes, on focus unless suggestOnFocus is false). ↑ / ↓ pick a suggestion, Enter or a click
+ * takes it and submits, Enter alone (or the button) submits onSubmit(names, text typed), Esc closes the list (then
+ * calls onCancel when given).
  * Returns {el, input, set(text), focus(), destroy()}.
  */
-export function geneInput({ id, label = 'Genes', placeholder = 'e.g. Ctsk, Acp5', submitLabel = 'Show', search, onSubmit, onCancel } = {}) {
+export function geneInput({
+  id, label = 'Genes', placeholder = 'e.g. Ctsk, Acp5', submitLabel = 'Show', search, onSubmit, onCancel, suggestOnFocus = true,
+} = {}) {
   const inputId = id || uid('sv-genes');
   const listId = `${inputId}-list`;
   const input = h('input', {
@@ -794,7 +840,7 @@ export function geneInput({ id, label = 'Genes', placeholder = 'e.g. Ctsk, Acp5'
   let seq = 0;
 
   const lastToken = () => {
-    const m = /[^\s,;]*$/.exec(input.value);
+    const m = /[^\s,;+]*$/.exec(input.value);
     return m ? m[0] : '';
   };
 
@@ -870,11 +916,11 @@ export function geneInput({ id, label = 'Genes', placeholder = 'e.g. Ctsk, Acp5'
   function submit() {
     stop();
     close();
-    if (onSubmit) onSubmit(parseGenes(input.value));
+    if (onSubmit) onSubmit(parseGenes(input.value), input.value);
   }
 
   input.addEventListener('input', () => lookup());
-  input.addEventListener('focus', () => lookup());
+  input.addEventListener('focus', () => { if (suggestOnFocus) lookup(); });
   input.addEventListener('blur', () => { stop(); close(); });
   input.addEventListener('keydown', (e) => {
     const open = !list.hidden && items.length > 0;
@@ -1470,7 +1516,7 @@ export function spatialViewer({ source, store, binUm: binUmOption, emptyText }) 
     let pinch = null;
 
     // ---- DOM
-    const ids = { sample: uid('sv-sample'), field: uid('sv-field'), genes: uid('sv-genes'), overlay: uid('sv-overlay'), ovlGenes: uid('sv-ovl-genes') };
+    const ids = { sample: uid('sv-sample'), field: uid('sv-field'), genes: uid('sv-genes') };
     const titleEl = h('h3', { class: 'sv-panel-title' });
     const sampleSel = h('select', { class: 'select', id: ids.sample, onChange: () => setSample(sampleSel.value) });
     const fieldSel = h('select', {
@@ -1484,12 +1530,15 @@ export function spatialViewer({ source, store, binUm: binUmOption, emptyText }) 
     const geneBox = hasGenes ? geneInput({ id: ids.genes, label: 'Genes', submitLabel: 'Show', search: searchGenes, onSubmit: setGenes }) : null;
     const geneCtl = geneBox ? h('div', { class: 'sv-control sv-control-wide', hidden: true },
       h('label', { for: ids.genes }, 'Genes (several are summed)'), geneBox.el) : null;
-    const overlaySel = h('select', { class: 'select', id: ids.overlay, onChange: onOverlaySelect });
-    const ovlGeneBox = hasGenes ? geneInput({
-      id: ids.ovlGenes, label: 'Overlay genes', submitLabel: 'Add', search: searchGenes, onSubmit: addGeneOverlay, onCancel: closeGeneOverlay,
-    }) : null;
-    const ovlGeneCtl = ovlGeneBox ? h('div', { class: 'sv-control sv-control-wide', hidden: true },
-      h('label', { for: ids.ovlGenes }, 'Overlay: bins detecting these genes'), ovlGeneBox.el) : null;
+    // overlays: "+ Add gene" opens a popover (a gene box, then the yes/no fields not shown yet); every overlay is a chip
+    // of the row under the controls, in its color, with its remove button
+    const addBtn = h('button', {
+      class: 'btn sv-add', type: 'button', 'aria-haspopup': 'dialog', 'aria-expanded': 'false',
+      title: hasGenes ? 'Show a gene on this map in its own color, on top of the coloring (or a call or region)'
+        : 'Show a call or region on top of the coloring',
+      onClick: toggleAdd,
+    }, icon('plus', { size: 15 }), hasGenes ? 'Add gene' : 'Add overlay');
+    let addPop = null; // the open popover of addBtn: {pop, box (its gene box)}
     const dimInput = h('input', { type: 'checkbox', checked: st.dim, onChange: () => { st.dim = dimInput.checked; requestRender(); } });
     const ovlChips = h('ul', { class: 'chip-list sv-ovl-chips', 'aria-label': 'Overlays' });
     const ovlRow = h('div', { class: 'sv-ovl-row', hidden: true }, ovlChips,
@@ -1498,8 +1547,7 @@ export function spatialViewer({ source, store, binUm: binUmOption, emptyText }) 
       h('div', { class: 'sv-control' }, h('label', { for: ids.sample }, 'Section'), sampleSel),
       h('div', { class: 'sv-control' }, h('label', { for: ids.field }, 'Color by'), fieldSel),
       geneCtl,
-      h('div', { class: 'sv-control' }, h('label', { for: ids.overlay }, 'Overlays'), overlaySel),
-      ovlGeneCtl);
+      h('div', { class: 'sv-control sv-control-auto' }, h('span', { class: 'sv-control-label' }, 'Overlays'), addBtn));
     const canvas = h('canvas', {
       class: 'sv-canvas', tabIndex: 0, role: 'img',
       'aria-label': 'Map of the bins of the section. Drag or use the arrow keys to pan; scroll, + and − to zoom; 0 fits the section.',
@@ -1893,7 +1941,7 @@ export function spatialViewer({ source, store, binUm: binUmOption, emptyText }) 
       const colorKey = st.field === GENE_FIELD && st.genes.length ? genesKey(st.genes) : null;
       for (const gk of neededGeneKeys()) {
         const gv = geneVecs.get(gk);
-        if (gv) row(`${geneText(gv.used.length ? gv.used : gk.split(','))} (UMIs)`, formatNumber(gv.counts[i]), gk === colorKey);
+        if (gv) row(`${geneText(gv.used.length ? gv.used : gk.split(','))} (UMIs)`, formatNumber(gv.counts[i]), gk === colorKey || st.overlays.includes(GENE_OVERLAY + gk));
       }
       const calls = [];
       let anyCall = false;
@@ -1972,7 +2020,7 @@ export function spatialViewer({ source, store, binUm: binUmOption, emptyText }) 
       if (st.field === GENE_FIELD) what = st.genes.length ? `${geneText(geneNames())} (UMIs)` : 'gene expression';
       else what = st.field && data.fields.has(st.field) ? fieldLabel(st.field) : 'bins';
       const n = st.overlays.length;
-      if (n === 1 || n === 2) what += ` + ${st.overlays.map(overlayLabel).join(', ')}`;
+      if (n === 1 || n === 2) what += ` + ${st.overlays.map(layerLabel).join(', ')}`;
       else if (n > 2) what += ` + ${n} overlays`;
       return what;
     }
@@ -2065,12 +2113,19 @@ export function spatialViewer({ source, store, binUm: binUmOption, emptyText }) 
     /** Color of the bins in two or more overlays as drawn now (see SEVERAL; its swatch has a visible rim when dark). */
     const severalColor = () => (showImage() ? EXPORT_PALETTE.several : 'var(--text)');
 
+    /** Name of an overlay as shown: the gene names of the data once its counts are there ('Ctsk' for 'ctsk'). */
+    function layerLabel(key) {
+      const l = ovl ? ovl.layers.find((x) => x.key === key) : null;
+      return l ? l.label : overlayLabel(key);
+    }
+
     function overlayLegend() {
       const layers = ovl ? ovl.layers : [];
       const items = layers.map((l) => h('li', { class: 'sv-ovl' },
         h('span', { class: 'swatch', style: { background: l.color } }),
         h('span', { class: 'sv-item-label' }, l.label),
-        h('span', { class: 'sv-item-count' }, l.count === null ? l.status : fmt.int(l.count))));
+        h('span', { class: l.count === null && l.status !== LOADING ? 'sv-item-count sv-warn' : 'sv-item-count' },
+          l.count === null ? l.status : fmt.int(l.count))));
       if (ovl && ovl.several) {
         items.push(h('li', { class: 'sv-ovl' },
           h('span', { class: 'swatch sv-swatch-ink', style: { background: severalColor() } }),
@@ -2080,9 +2135,12 @@ export function spatialViewer({ source, store, binUm: binUmOption, emptyText }) 
       const errors = st.overlays.filter((k) => k.startsWith(GENE_OVERLAY)).map((k) => k.slice(GENE_OVERLAY.length))
         .filter((gk) => geneErrors.has(gk) && !(st.field === GENE_FIELD && genesKey(st.genes) === gk))
         .map((gk) => retryLine(`${geneText(gk.split(','))}: ${geneErrors.get(gk)}`, () => retryGenes(gk)));
+      const notes = layers.filter((l) => l.note).map((l) => h('li', { class: 'sv-warn' }, `${l.label}: ${l.note}`));
       return h('div', { class: 'sv-legend-section' },
         h('h4', null, 'Overlays'),
+        layers.some(isGeneLayer) ? h('p', { class: 'sv-hint' }, 'A gene marks the bins detecting it (1 UMI or more).') : null,
         h('ul', { class: 'sv-ovl-list', title: 'Bins in each overlay (overlap included)' }, items),
+        notes.length ? h('ul', { class: 'sv-facts' }, notes) : null,
         errors);
     }
 
@@ -2154,18 +2212,31 @@ export function spatialViewer({ source, store, binUm: binUmOption, emptyText }) 
       canvas.focus();
     }
 
+    /**
+     * The chips of the overlays (row under the controls): its color, its name and a remove button each; a chip whose
+     * overlay cannot be drawn (gene not in the data, counts that failed to load) is marked.
+     */
     function paintOverlayRow() {
       ovlRow.hidden = !st.overlays.length;
       const layers = ovl ? ovl.layers : [];
+      // a focused remove button keeps the focus when the chips are made again (gene counts arriving, a rename)
+      const focused = ovlChips.contains(document.activeElement)
+        ? [...ovlChips.querySelectorAll('button')].indexOf(document.activeElement) : -1;
       mount(ovlChips, st.overlays.map((key) => {
         const l = layers.find((x) => x.key === key);
-        const label = overlayLabel(key);
-        return h('li', { class: 'chip sv-chip', title: l && l.count === null ? `${label}: ${l.status}` : label },
+        const label = l ? l.label : overlayLabel(key);
+        const bad = !!l && ((l.count === null && l.status !== LOADING) || !!l.note);
+        const what = l && l.count === null ? `${label}: ${l.status}` : (l && l.note ? `${label}: ${l.note}` : label);
+        return h('li', { class: bad ? 'chip sv-chip warn' : 'chip sv-chip', title: what, dataset: { key } },
           h('span', { class: 'swatch', style: { background: l ? l.color : 'transparent' } }),
           h('span', { class: 'chip-text' }, label),
           h('button', { type: 'button', 'aria-label': `Remove the overlay ${label}`, title: 'Remove', onClick: () => removeOverlay(key) },
             icon('x', { size: 12 })));
       }));
+      if (focused >= 0) {
+        const btns = ovlChips.querySelectorAll('button');
+        (btns.length ? btns[Math.min(focused, btns.length - 1)] : addBtn).focus();
+      }
     }
 
     // ---- coloring and overlays
@@ -2175,9 +2246,12 @@ export function spatialViewer({ source, store, binUm: binUmOption, emptyText }) 
         if (key.startsWith(GENE_OVERLAY)) {
           const gk = key.slice(GENE_OVERLAY.length);
           const gv = geneVecs.get(gk);
+          const none = !!gv && !gv.used.length; // none of its genes is in the data
           return {
-            key, label: overlayLabel(key), color: null, mask: gv ? (i) => gv.counts[i] > 0 : null,
-            status: gv ? '' : (geneErrors.has(gk) ? 'failed' : 'loading…'),
+            key, label: geneText(gv && gv.used.length ? gv.used : gk.split(',')), color: null,
+            mask: gv && !none ? (i) => gv.counts[i] > 0 : null,
+            status: none ? 'not in the data' : (gv ? '' : (geneErrors.has(gk) ? 'failed' : LOADING)),
+            note: gv && !none && gv.missing.length ? `not in the data: ${gv.missing.join(', ')}` : '',
           };
         }
         const f = data.fields.get(key);
@@ -2284,22 +2358,14 @@ export function spatialViewer({ source, store, binUm: binUmOption, emptyText }) 
       fieldSel.disabled = !groups.length && !hasGenes;
     }
 
-    function fillOverlaySelect() {
-      const opts = [h('option', { value: '' }, st.overlays.length ? 'Add another…' : 'Add an overlay…')];
-      const bools = data ? data.order.filter((k) => data.fields.get(k).type === 'bool' && !st.overlays.includes(k)) : [];
-      if (bools.length) {
-        opts.push(h('optgroup', { label: 'Region, quality control and calls' }, bools.map((k) => h('option', { value: k }, fieldLabel(k)))));
-      }
-      if (hasGenes) {
-        const geneOpts = [];
-        const current = st.field === GENE_FIELD && st.genes.length ? GENE_OVERLAY + genesKey(st.genes) : null;
-        if (current && !st.overlays.includes(current)) geneOpts.push(h('option', { value: current }, overlayLabel(current)));
-        geneOpts.push(h('option', { value: GENE_OVERLAY }, 'Gene detected…'));
-        opts.push(h('optgroup', { label: 'Expression' }, geneOpts));
-      }
-      mount(overlaySel, opts);
-      overlaySel.value = '';
-      overlaySel.disabled = opts.length < 2;
+    /** Region, quality control and calls (yes/no fields) of the section that are not overlays yet, in field order. */
+    function freeBools() {
+      return data ? data.order.filter((k) => data.fields.get(k).type === 'bool' && !st.overlays.includes(k)) : [];
+    }
+
+    /** "+ Add gene" can add something: a gene (when the source has genes) or a yes/no field not shown yet. */
+    function paintAddBtn() {
+      addBtn.disabled = !hasGenes && !freeBools().length;
     }
 
     function syncControls() {
@@ -2307,7 +2373,7 @@ export function spatialViewer({ source, store, binUm: binUmOption, emptyText }) 
       fieldSel.value = st.field;
       if (geneCtl) geneCtl.hidden = st.field !== GENE_FIELD;
       if (geneBox) geneBox.set(st.genes.join(', '));
-      fillOverlaySelect();
+      paintAddBtn();
       dimInput.checked = st.dim;
     }
 
@@ -2340,55 +2406,160 @@ export function spatialViewer({ source, store, binUm: binUmOption, emptyText }) 
       restyle();
     }
 
-    function onOverlaySelect() {
-      const v = overlaySel.value;
-      overlaySel.value = '';
-      if (!v) return;
-      if (v === GENE_OVERLAY) {
-        if (ovlGeneCtl) {
-          ovlGeneCtl.hidden = false;
-          ovlGeneBox.focus();
-        }
+    // ---- "+ Add gene": a popover with a gene box (Enter or a suggestion adds the genes typed, one overlay each, or one
+    // for genes joined by +) and the yes/no fields not shown yet (a click adds one); either closes it
+    function toggleAdd() {
+      if (addPop && addPop.pop.isOpen()) addPop.pop.close();
+      else openAdd();
+    }
+
+    function openAdd() {
+      if (st.overlays.length >= MAX_OVERLAYS) {
+        tooManyOverlays([]);
         return;
       }
-      addOverlay(v);
+      const parts = [];
+      let box = null;
+      if (hasGenes) {
+        const boxId = uid('sv-add-gene');
+        box = geneInput({
+          id: boxId, label: 'Gene', placeholder: 'e.g. Ctsk', submitLabel: 'Add', search: searchGenes, suggestOnFocus: false,
+          onSubmit: (names, text) => addGenes(text),
+        });
+        const hintId = uid('sv-add-hint');
+        box.input.setAttribute('aria-describedby', hintId);
+        parts.push(h('div', { class: 'sv-add-section' },
+          h('label', { class: 'sv-add-label', for: boxId }, 'Gene'),
+          box.el,
+          h('p', { class: 'sv-add-hint', id: hintId },
+            'Drawn in its own color on the bins detecting it. Several at once: Ctsk, Acp5. Joined by +, one color for the bins detecting any of them: Ctsk + Acp5.')));
+      }
+      const bools = freeBools();
+      if (bools.length) {
+        const headId = uid('sv-add-calls');
+        const items = bools.map((k) => h('li', null, h('button', {
+          class: 'sv-add-item', type: 'button',
+          onClick: () => {
+            closeAdd(true);
+            addOverlays([k]);
+          },
+        }, fieldLabel(k))));
+        parts.push(h('div', { class: 'sv-add-section' },
+          h('div', { class: 'sv-add-label', id: headId }, hasGenes ? 'Or a call, region or quality control' : 'Calls, region and quality control'),
+          h('ul', { class: 'sv-add-list', role: 'list', 'aria-labelledby': headId, onKeydown: listKeys }, items)));
+      }
+      if (!parts.length) return; // nothing to add (a section still loading, every yes/no field shown already)
+      const pop = popover(addBtn, parts, {
+        label: hasGenes ? 'Add a gene to this map' : 'Add an overlay to this map', cls: 'sv-add-pop',
+        onClose: () => {
+          if (box) box.destroy();
+          if (addPop && addPop.pop === pop) addPop = null;
+        },
+      });
+      addPop = { pop, box };
     }
 
-    function addOverlay(key) {
-      if (!st.overlays.includes(key)) st.overlays.push(key);
-      if (key.startsWith(GENE_OVERLAY)) geneErrors.delete(key.slice(GENE_OVERLAY.length));
-      if (!data) { paintOverlayRow(); return; } // a section is loading: the chips follow now, the map once it is there
-      fillOverlaySelect();
-      ensureGenes();
-      prune();
-      restyle();
+    /** ↑ / ↓ (Home / End) move between the items of the popover's list. */
+    function listKeys(e) {
+      const list = [...e.currentTarget.querySelectorAll('button')];
+      const i = list.indexOf(document.activeElement);
+      let next = null;
+      if (e.key === 'ArrowDown') next = i + 1;
+      else if (e.key === 'ArrowUp') next = i - 1;
+      else if (e.key === 'Home') next = 0;
+      else if (e.key === 'End') next = list.length - 1;
+      if (next === null || !list.length) return;
+      e.preventDefault();
+      list[(next + list.length) % list.length].focus();
     }
 
-    function addGeneOverlay(genes) {
-      if (!genes.length) return;
-      if (genes.length > MAX_GENES) toast(`At most ${MAX_GENES} genes are summed; the first ${MAX_GENES} are used.`, 'warning');
-      ovlGeneBox.set('');
-      ovlGeneCtl.hidden = true;
-      addOverlay(GENE_OVERLAY + genesKey(genes.slice(0, MAX_GENES)));
-      overlaySel.focus();
+    function closeAdd(focusBack) {
+      if (addPop) addPop.pop.close({ focus: focusBack });
     }
 
-    function closeGeneOverlay() {
-      ovlGeneBox.set('');
-      ovlGeneCtl.hidden = true;
-      overlaySel.focus();
+    /** Overlays of the genes typed in the popover; one already shown flashes instead of coming twice. */
+    function addGenes(text) {
+      const groups = parseGeneLayers(text);
+      if (!groups.length) {
+        if (addPop && addPop.box) addPop.box.focus();
+        return;
+      }
+      const shown = new Map();
+      for (const k of st.overlays) if (k.startsWith(GENE_OVERLAY)) shown.set(foldGenes(k.slice(GENE_OVERLAY.length).split(',')), k);
+      const keys = [];
+      const again = [];
+      for (const genes of groups) {
+        const f = foldGenes(genes);
+        if (shown.has(f)) { again.push(shown.get(f)); continue; }
+        shown.set(f, null);
+        keys.push(GENE_OVERLAY + genesKey(genes));
+      }
+      const room = Math.max(0, MAX_OVERLAYS - st.overlays.length);
+      if (keys.length > room) tooManyOverlays(keys.slice(room));
+      closeAdd(true);
+      addOverlays(keys.slice(0, room));
+      if (again.length) {
+        flashChips(again);
+        toast(`Already on the map: ${again.map(layerLabel).join(', ')}.`, 'info', { timeout: 2500 });
+      }
+    }
+
+    function addOverlays(keys) {
+      const fresh = keys.filter((k) => !st.overlays.includes(k));
+      if (!fresh.length) return;
+      st.overlays.push(...fresh);
+      for (const k of fresh) if (k.startsWith(GENE_OVERLAY)) geneErrors.delete(k.slice(GENE_OVERLAY.length));
+      overlaysChanged();
     }
 
     function removeOverlay(key) {
+      const at = st.overlays.indexOf(key);
       st.overlays = st.overlays.filter((k) => k !== key);
+      overlaysChanged();
+      // the focus goes to the remove button of the chip now in its place (else the one before), else to "+ Add gene"
+      const btns = ovlChips.querySelectorAll('button');
+      const next = btns.length ? btns[Math.min(Math.max(at, 0), btns.length - 1)] : null;
+      (next || addBtn).focus();
+    }
+
+    /** After overlays were added, removed or renamed: load what they need, repaint, and tell the page (sv-change). */
+    function overlaysChanged() {
       if (data) {
-        fillOverlaySelect();
+        ensureGenes();
         prune();
         restyle();
       } else {
-        paintOverlayRow();
+        paintOverlayRow(); // a section is loading: the chips follow now, the map once it is there
+        measureSoon();
       }
-      overlaySel.focus();
+      paintAddBtn();
+      tellPage();
+    }
+
+    /** Draw the eye to chips (an overlay asked for again). */
+    function flashChips(keys) {
+      for (const li of ovlChips.children) {
+        if (!keys.includes(li.dataset.key)) continue;
+        li.classList.remove('flash');
+        void li.offsetWidth; // restart the animation
+        li.classList.add('flash');
+      }
+    }
+
+    /**
+     * An overlay typed in another case ('ctsk') takes the names the data has ('Ctsk') once its counts are there: the
+     * gene list of a page marks it, and the same gene typed again in yet another case is seen as shown. False when
+     * nothing changed.
+     */
+    function canonicalize(gk, gv) {
+      const at = st.overlays.indexOf(GENE_OVERLAY + gk);
+      if (at < 0 || gv.missing.length || !gv.used.length) return false;
+      const ck = genesKey(gv.used);
+      if (ck === gk) return false;
+      if (st.overlays.includes(GENE_OVERLAY + ck)) st.overlays.splice(at, 1);
+      else st.overlays[at] = GENE_OVERLAY + ck;
+      geneVecs.set(ck, gv);
+      return true;
     }
 
     // ---- data
@@ -2413,16 +2584,27 @@ export function spatialViewer({ source, store, binUm: binUmOption, emptyText }) 
       const sid = st.sample;
       const d = data;
       const token = loadToken;
+      let renamed = false;
       for (const gk of neededGeneKeys()) {
-        if (geneVecs.has(gk) || geneErrors.has(gk) || genePending.has(gk)) continue;
+        if (geneVecs.has(gk)) { // loaded before (e.g. 'ctsk' added, renamed, removed and typed again)
+          renamed = canonicalize(gk, geneVecs.get(gk)) || renamed;
+          continue;
+        }
+        if (geneErrors.has(gk) || genePending.has(gk)) continue;
         const cached = cachedGene(`${sid}\n${gk}`);
-        if (cached) { geneVecs.set(gk, cached); continue; }
+        if (cached) {
+          geneVecs.set(gk, cached);
+          renamed = canonicalize(gk, cached) || renamed;
+          continue;
+        }
         genePending.add(gk);
         loadGene(sid, d, gk.split(',')).then((gv) => {
           if (!alive || token !== loadToken) return;
           genePending.delete(gk);
           geneVecs.set(gk, gv);
+          const moved = canonicalize(gk, gv);
           restyle();
+          if (moved) tellPage();
         }, (err) => {
           if (!alive || token !== loadToken) return;
           genePending.delete(gk);
@@ -2431,6 +2613,12 @@ export function spatialViewer({ source, store, binUm: binUmOption, emptyText }) 
           restyle();
         });
       }
+      if (renamed) tellPage();
+    }
+
+    /** The overlays of this panel changed (added, removed, renamed): an sv-change event for the page (data explorer). */
+    function tellPage() {
+      el.dispatchEvent(new CustomEvent('sv-change', { bubbles: true }));
     }
 
     /** Load the H&E image of the section when it is shown; retry: after the Retry of a failed load. */
@@ -2482,6 +2670,7 @@ export function spatialViewer({ source, store, binUm: binUmOption, emptyText }) 
     async function load() {
       const token = ++loadToken;
       const sid = st.sample;
+      closeAdd(false); // its list of yes/no fields was the one of the section shown before
       setHover(-1);
       geneVecs = new Map();
       geneErrors = new Map();
@@ -2525,7 +2714,9 @@ export function spatialViewer({ source, store, binUm: binUmOption, emptyText }) 
     /** viewer.show(): change the section, the coloring or the overlays of this panel. */
     function apply(patch) {
       const before = st.sample;
-      patchState(st, patch);
+      const dropped = [];
+      patchState(st, patch, dropped);
+      if (dropped.length) tooManyOverlays(dropped);
       if (!samples.some((s) => s.id === st.sample)) st.sample = before;
       if (Array.isArray(patch.genes) || typeof patch.genes === 'string') geneErrors.delete(genesKey(st.genes));
       if (st.sample !== before || !data) {
@@ -2552,7 +2743,9 @@ export function spatialViewer({ source, store, binUm: binUmOption, emptyText }) 
       if (style && style.scale) hgt += 36 + 18 + (style.scale.clamped ? 18 : 0);
       if (style && style.kind === 'gene') hgt += 18 * (1 + (style.gene.missing.length ? 1 : 0));
       hgt += 19 * (style ? style.legend.filter((e) => !e.off).length : 0);
-      if (ovl && ovl.layers.length) hgt += 26 + 19 * (ovl.layers.length + (ovl.several ? 1 : 0));
+      if (ovl && ovl.layers.length) {
+        hgt += 26 + 19 * (ovl.layers.length + (ovl.several ? 1 : 0)) + (ovl.layers.some(isGeneLayer) ? 18 : 0);
+      }
       return hgt + 8;
     }
 
@@ -2610,6 +2803,12 @@ export function spatialViewer({ source, store, binUm: binUmOption, emptyText }) 
         g.font = `600 12px ${FONT}`;
         g.fillText('Overlays', x, top, width);
         top += 20;
+        if (ovl.layers.some(isGeneLayer)) {
+          g.fillStyle = P.muted;
+          g.font = `12px ${FONT}`;
+          g.fillText('genes: the bins detecting them', x, top, width);
+          top += 18;
+        }
         for (const l of ovl.layers) swatchRow(l.color, l.label, l.count);
         if (ovl.several) swatchRow(SEVERAL, 'In two or more overlays', ovl.several);
       }
@@ -2667,7 +2866,7 @@ export function spatialViewer({ source, store, binUm: binUmOption, emptyText }) 
       resizeObserver.unobserve(el);
       tip.hidden = true;
       if (geneBox) geneBox.destroy();
-      if (ovlGeneBox) ovlGeneBox.destroy();
+      closeAdd(false);
       layer.width = 0;
       layer.height = 0;
     }
@@ -2714,7 +2913,9 @@ export function spatialViewer({ source, store, binUm: binUmOption, emptyText }) 
         return;
       }
       // a panel not shown (yet): remember the change for when it is
-      store.panels[i] = patchState(store.panels[i] && typeof store.panels[i] === 'object' ? store.panels[i] : {}, patch);
+      const dropped = [];
+      store.panels[i] = patchState(store.panels[i] && typeof store.panels[i] === 'object' ? store.panels[i] : {}, patch, dropped);
+      if (dropped.length) tooManyOverlays(dropped);
     },
     destroy() {
       destroyed = true;

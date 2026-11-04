@@ -310,6 +310,23 @@
 .sv-ovl-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; padding: 8px 14px; border-bottom: 1px solid var(--border); }
 .sv-ovl-chips { flex: 1 1 auto; }
 .sv-chip { font-family: var(--font); }
+/* "+ Add gene" (where the overlays are chosen) and its popover: a gene box, then the yes/no fields not shown yet */
+.sv-panel-controls .sv-control-auto { flex: 0 0 auto; }
+.sv-add { align-self: flex-start; white-space: nowrap; }
+.sv-add[aria-expanded="true"] { border-color: var(--accent); background: var(--accent-soft); color: var(--accent-text); }
+.sv-add-pop { display: flex; flex-direction: column; gap: 12px; }
+.sv-add-section { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.sv-add-section + .sv-add-section { padding-top: 11px; border-top: 1px solid var(--border); }
+.sv-add-label { font-size: 12px; font-weight: 600; color: var(--text-muted); }
+.sv-add-hint { margin: 0; font-size: 11.5px; line-height: 1.45; color: var(--text-muted); }
+.sv-add-list { list-style: none; margin: 0 -6px; padding: 0; max-height: 200px; overflow: auto; display: flex; flex-direction: column; gap: 1px; }
+.sv-add-item {
+  display: block; width: 100%; padding: 6px 8px; border: 0; border-radius: 5px; background: none; color: var(--text);
+  font: 500 12.5px/1.35 var(--font); text-align: left; cursor: pointer;
+}
+.sv-add-item:hover, .sv-add-item:focus { background: var(--surface-3); outline: none; }
+.sv-add-item:focus-visible { box-shadow: inset 0 0 0 2px rgba(61, 124, 245, 0.55); }
+@media (max-height: 720px) { .sv-add-list { max-height: 132px; } }
 .sv-dim { font-size: 12.5px; color: var(--text-muted); }
 .sv-panel-body { display: grid; grid-template-columns: minmax(0, 1fr); }
 .sv[data-layout="1"] .sv-panel-body { grid-template-columns: minmax(0, 1fr) 260px; }

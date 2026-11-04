@@ -265,12 +265,77 @@ function swallowRowClick(target) {
 
 function closeMenu({ focus = false } = {}) {
   if (!openMenu) return;
-  const { pop, trigger, cleanup } = openMenu;
+  const { pop, trigger, cleanup, onClose } = openMenu;
   openMenu = null;
   cleanup();
   pop.remove();
   trigger.setAttribute('aria-expanded', 'false');
+  if (onClose) onClose();
   if (focus && trigger.isConnected) trigger.focus();
+}
+
+/**
+ * Put pop (a menu or a popover, built) in the page under its button, or over it when there is no room below, and make
+ * it the open one: it follows its button when the page scrolls and closes once the button has left the window, on a
+ * press outside it, on resizing or navigation, and when its button leaves the page. Returns place() (placing it again,
+ * e.g. after its content changed size).
+ */
+function openPop(trigger, pop, align, onClose) {
+  document.body.append(pop);
+  // which side of the button it opened on, and whether it fitted on neither (a small screen); both kept while it
+  // follows a scroll
+  let below = null;
+  let squeezed = false;
+  const place = () => {
+    const r = trigger.getBoundingClientRect();
+    if (!trigger.isConnected || r.bottom < 0 || r.top > window.innerHeight) return false;
+    const pw = pop.offsetWidth;
+    const ph = pop.offsetHeight;
+    let left = align === 'start' ? r.left : r.right - pw;
+    left = Math.max(8, Math.min(left, window.innerWidth - pw - 8));
+    if (below === null) {
+      const fitsBelow = r.bottom + 4 + ph <= window.innerHeight - 8;
+      const fitsAbove = r.top - ph - 4 >= 8;
+      below = fitsBelow || !fitsAbove;
+      squeezed = !fitsBelow && !fitsAbove;
+    }
+    let top = below ? r.bottom + 4 : r.top - ph - 4;
+    // no room on either side: kept inside the window, over its button if need be
+    if (squeezed && top + ph > window.innerHeight - 8) top = Math.max(8, window.innerHeight - ph - 8);
+    pop.style.left = `${Math.round(left)}px`;
+    pop.style.top = `${Math.round(top)}px`;
+    return true;
+  };
+  place();
+  trigger.setAttribute('aria-expanded', 'true');
+  const onDown = (e) => {
+    if (pop.contains(e.target) || trigger.contains(e.target)) return;
+    closeMenu();
+    if (e.button === 0) swallowRowClick(e.target);
+  };
+  // a repaint that removes the button (its row rebuilt) closes what it opened, which would act on a row no longer shown
+  const watch = typeof MutationObserver === 'function'
+    ? new MutationObserver(() => { if (!trigger.isConnected && openMenu && openMenu.pop === pop) closeMenu(); }) : null;
+  if (watch) watch.observe(document.body, { childList: true, subtree: true });
+  // a scroll of the page moves it with its button (a click often lands while the page still scrolls); it closes once
+  // the button has left the window
+  const onScroll = (e) => { if (!pop.contains(e.target) && !place()) closeMenu(); };
+  const onResize = () => closeMenu();
+  document.addEventListener('pointerdown', onDown, true);
+  window.addEventListener('scroll', onScroll, true);
+  window.addEventListener('resize', onResize);
+  window.addEventListener('hashchange', onResize);
+  openMenu = {
+    pop, trigger, onClose,
+    cleanup() {
+      if (watch) watch.disconnect();
+      document.removeEventListener('pointerdown', onDown, true);
+      window.removeEventListener('scroll', onScroll, true);
+      window.removeEventListener('resize', onResize);
+      window.removeEventListener('hashchange', onResize);
+    },
+  };
+  return place;
 }
 
 function showMenu(trigger, items, align, focusFirst) {
@@ -314,23 +379,7 @@ function showMenu(trigger, items, align, focusFirst) {
     pop.append(el);
   }
   if (pop.lastElementChild && pop.lastElementChild.classList.contains('menu-sep')) pop.lastElementChild.remove();
-  document.body.append(pop);
-  let below = null;   // which side of the button the menu opened on; kept while it follows a scroll
-  const place = () => {
-    const r = trigger.getBoundingClientRect();
-    if (!trigger.isConnected || r.bottom < 0 || r.top > window.innerHeight) return false;
-    const pw = pop.offsetWidth;
-    const ph = pop.offsetHeight;
-    let left = align === 'start' ? r.left : r.right - pw;
-    left = Math.max(8, Math.min(left, window.innerWidth - pw - 8));
-    if (below === null) below = !(r.bottom + 4 + ph > window.innerHeight - 8 && r.top - ph - 4 >= 8);
-    const top = below ? r.bottom + 4 : r.top - ph - 4;
-    pop.style.left = `${Math.round(left)}px`;
-    pop.style.top = `${Math.round(top)}px`;
-    return true;
-  };
-  place();
-  trigger.setAttribute('aria-expanded', 'true');
+  openPop(trigger, pop, align);
 
   const enabled = () => entries.filter((e) => !e.disabled);
   const focusAt = (i) => { const list = enabled(); if (list.length) list[((i % list.length) + list.length) % list.length].focus(); };
@@ -343,34 +392,73 @@ function showMenu(trigger, items, align, focusFirst) {
       list[i].click();
     }
   });
-  const onDown = (e) => {
-    if (pop.contains(e.target) || trigger.contains(e.target)) return;
-    closeMenu();
-    if (e.button === 0) swallowRowClick(e.target);
-  };
-  // a repaint that removes the menu's button (its row rebuilt) closes the menu, which would act on a row no longer shown
-  const watch = typeof MutationObserver === 'function'
-    ? new MutationObserver(() => { if (!trigger.isConnected && openMenu && openMenu.pop === pop) closeMenu(); }) : null;
-  if (watch) watch.observe(document.body, { childList: true, subtree: true });
-  // a scroll of the page moves the menu with its button (a click often lands while the page still scrolls); the menu
-  // closes once the button has left the window
-  const onScroll = (e) => { if (!pop.contains(e.target) && !place()) closeMenu(); };
-  const onResize = () => closeMenu();
-  document.addEventListener('pointerdown', onDown, true);
-  window.addEventListener('scroll', onScroll, true);
-  window.addEventListener('resize', onResize);
-  window.addEventListener('hashchange', onResize);
-  openMenu = {
-    pop, trigger,
-    cleanup() {
-      if (watch) watch.disconnect();
-      document.removeEventListener('pointerdown', onDown, true);
-      window.removeEventListener('scroll', onScroll, true);
-      window.removeEventListener('resize', onResize);
-      window.removeEventListener('hashchange', onResize);
-    },
-  };
   if (focusFirst) focusAt(focusFirst === 'last' ? -1 : 0); else pop.focus({ preventScroll: true });
+}
+
+/** The elements of root that Tab stops at, in page order (shown, enabled, not taken out of the tab order). */
+function tabStops(root) {
+  return [...root.querySelectorAll('a[href], button, input, select, textarea, [tabindex]')]
+    .filter((el) => !el.disabled && el.tabIndex >= 0 && el.getClientRects().length > 0 && !el.closest('[inert], [hidden]'));
+}
+
+/**
+ * Popover: a small panel that is not modal (role="dialog") under its button, for a short form such as a search box
+ * and a list to pick from. It shares the menus' slot (one menu or popover open at a time) and their placing and
+ * closing (see openPop); it also closes on Escape (the focus back on its button), on Tab past its last field (the
+ * focus then on the page's next stop after its button) or Shift+Tab before its first (the focus on its button), and
+ * when the focus leaves it otherwise (a click in another field).
+ * The caller sets aria-haspopup="dialog" on the button and toggles it (isOpen() / close()).
+ * content: its children; label: its accessible name (the button's text when left out); align: 'start' (left edges
+ * lined up, the default) or 'end'; focus: the element focused on opening (the first field or button when left out);
+ * onClose: called once it has closed, whatever closed it.
+ * -> {el, place() (after its content changed size), close({focus}), isOpen()}
+ */
+export function popover(trigger, content, { label, align = 'start', focus, onClose, cls = '' } = {}) {
+  closeMenu();
+  const pop = h('div', {
+    class: ['menu-pop', 'popover', cls].filter(Boolean).join(' '), role: 'dialog', tabindex: '-1',
+    'aria-label': label || trigger.getAttribute('aria-label') || trigger.textContent.trim() || 'Options',
+  }, content);
+  const isOpen = () => !!(openMenu && openMenu.pop === pop);
+  pop.addEventListener('keydown', (e) => {
+    if (e.defaultPrevented) return;   // a field may use the key first (Escape closing its own list)
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
+      closeMenu({ focus: true });
+      return;
+    }
+    if (e.key !== 'Tab') return;
+    // Tab and Shift+Tab move within it; past its ends it closes and the focus goes on from its button (it sits at the
+    // end of the page, where the browser's own next stop would be)
+    const stops = tabStops(pop);
+    const i = stops.indexOf(document.activeElement);
+    if (e.shiftKey ? i > 0 : i >= 0 && i < stops.length - 1) return;
+    e.preventDefault();
+    if (i < 0 && !e.shiftKey && stops.length) { stops[0].focus(); return; } // from the popover itself (a click on it)
+    closeMenu({ focus: true });
+    if (!e.shiftKey && trigger.isConnected) {
+      const page = tabStops(document.body);
+      const next = page[page.indexOf(trigger) + 1];
+      if (next) next.focus();
+    }
+  });
+  // Tab past its last field, or a click on another field of the page; a focus that goes nowhere (the window left, a
+  // click on the page's background) leaves it to the press outside
+  pop.addEventListener('focusout', (e) => {
+    const to = e.relatedTarget;
+    if (!(to instanceof Node) || pop.contains(to) || trigger.contains(to)) return;
+    if (isOpen()) closeMenu();
+  });
+  const place = openPop(trigger, pop, align, onClose);
+  const target = focus || pop.querySelector('input:not(:disabled), select:not(:disabled), textarea:not(:disabled), button:not(:disabled)') || pop;
+  target.focus({ preventScroll: true });
+  return {
+    el: pop,
+    place,
+    isOpen,
+    close({ focus: back = false } = {}) { if (isOpen()) closeMenu({ focus: back }); },
+  };
 }
 
 /**
