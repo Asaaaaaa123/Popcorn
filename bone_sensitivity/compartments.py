@@ -445,6 +445,9 @@ def run(a, cfg, progress=None):
     bin_um, block_um = pc.bin_um(cfg["bin_size"]), float(st["pseudobulk_block_um"])
     dist_um, min_bins, n_reps = float(st["anatomical_distance_um"]), int(st["min_region_bins"]), int(st["n_depth_reps"])
     S, P = pc.signature_label(cfg, sig), pc.signature_label(cfg, split)
+    # [APP] the compartment names of the warnings and notes: the manuscript's only for its osteoclast / chondrocyte split
+    GP, TA = pc.compartment_names(cfg)
+    GPn = "growth plate" if GP == "growth-plate" else GP
     tumor_txt = ", ".join(cp["tumor_conditions"])
     sections = common.sample_ids(a, cfg)
     smp = a.obs["sample"].astype(str).to_numpy()
@@ -466,7 +469,7 @@ def run(a, cfg, progress=None):
     diag = diagnostics(sections, smp, thr, above, is_zero, score, comp, roi, umi, split_umi, core_umi)
     if is_zero:
         common.warn(progress, f"Figure 4h: the {cp['percentile']:g}th percentile of the {P} score is exactly 0, so the "
-                              f"growth-plate rule is '{P} score > 0' ({int(above.sum()):,} bins; "
+                              f"{GP} rule is '{P} score > 0' ({int(above.sum()):,} bins; "
                               f"{int((split_umi >= 1).sum()):,} bins have >= 1 {P} UMI)")
     rule = (f"{S}-positive bins with {P} score > {thr:.4g} (the {cp['percentile']:g}th percentile of all bins"
             + (", exactly 0" if is_zero else "") + ")")
@@ -484,15 +487,15 @@ def run(a, cfg, progress=None):
         where = f"both compartments from {tumor_txt} sections"
     else:
         off = per_section(gp_m, False)
-        where = (f"de_sections = all: growth-plate bins of every section ({int((gp_m & ~tumor).sum()):,} of "
+        where = (f"de_sections = all: {GP} bins of every section ({int((gp_m & ~tumor).sum()):,} of "
                  f"{int(gp_m.sum()):,} from non-{tumor_txt} sections" + (f": {off}" if off else "")
-                 + f"), tumor-associated bins of {tumor_txt} sections")
+                 + f"), {TA} bins of {tumor_txt} sections")
 
     def within_tumor(gp):
         """Note of a variant that takes both compartments from tumor sections: growth-plate bins per section."""
         off = per_section(gp, False)
         return (f"both compartments from {tumor_txt} sections only (whatever de_sections), so that the contrast stays "
-                f"within the tumor-bearing sections; growth-plate bins per {tumor_txt} section: "
+                f"within the tumor-bearing sections; {GP} bins per {tumor_txt} section: "
                 f"{per_section(gp, True) or 'none'}" + (f"; left out, not {tumor_txt} sections: {off}" if off else ""))
 
     # 3. variants
@@ -503,8 +506,8 @@ def run(a, cfg, progress=None):
         labels = lab[m].astype(str)
         n = {g: int((labels == g).sum()) for g in GROUPS}
         if min(n.values()) < 2:
-            common.warn(progress, f"Figure 4h sensitivity ({name}): {n[GROUPS[0]]} growth-plate and {n[GROUPS[1]]} "
-                                  f"tumor-associated bins; at least two of each are needed, not estimable")
+            common.warn(progress, f"Figure 4h sensitivity ({name}): {n[GROUPS[0]]} {GP} and {n[GROUPS[1]]} "
+                                  f"{TA} bins; at least two of each are needed, not estimable")
             rows.append(_row(name, "not estimable", "bins", n[GROUPS[0]], n[GROUPS[1]],
                              _median(umi[m][labels == GROUPS[0]]), _median(umi[m][labels == GROUPS[1]]),
                              note=note + "; fewer than two bins in a compartment"))
@@ -516,7 +519,7 @@ def run(a, cfg, progress=None):
                          _median(umi[m][labels == GROUPS[1]]), de, note))
 
     lab_m = np.where(in_sections, _labels(gp_m, comp == GROUPS[1]), "")
-    bins_variant("manuscript", lab_m, f"growth plate = {rule}; tumor-associated = the other {S}-positive bins of "
+    bins_variant("manuscript", lab_m, f"{GPn} = {rule}; {TA} = the other {S}-positive bins of "
                                       f"{tumor_txt} sections; {where}; Wilcoxon rank-sum over bins on the "
                                       f"log-normalized expression (Figure4h_osteoclast_compartment_DE.csv)")
     if roi is None:
@@ -569,13 +572,13 @@ def run(a, cfg, progress=None):
         g, t = GROUPS
         note = (f"units = {block_um:g} um array-grid blocks x compartment per section, counts summed over the "
                 f"manuscript bins of each unit ({sum(un.values())} units from {len(idx):,} bins; median bins per unit "
-                f"{bpu[g]:g} growth plate vs {bpu[t]:g} tumor-associated, median UMI per unit {uu[g]:g} vs "
+                f"{bpu[g]:g} {GPn} vs {bpu[t]:g} {TA}, median UMI per unit {uu[g]:g} vs "
                 f"{uu[t]:g}); {where}")
         if de is None:
             rows.append(_row("block_pseudobulk", "not estimable", bp_units, un[g], un[t], uu[g], uu[t],
                              note=note + "; fewer than two units in a compartment"))
-            common.warn(progress, f"Figure 4h sensitivity (block_pseudobulk): {un[g]} growth-plate and {un[t]} "
-                                  f"tumor-associated units; not estimable")
+            common.warn(progress, f"Figure 4h sensitivity (block_pseudobulk): {un[g]} {GP} and {un[t]} "
+                                  f"{TA} units; not estimable")
         else:
             deep = info["deeper"]
             de_all["block_pseudobulk"] = de
@@ -589,13 +592,13 @@ def run(a, cfg, progress=None):
 
     # anatomical and drawn growth-plate definitions, both compartments from tumor sections
     bins_variant("anatomical", np.where(tumor, _labels(oc & near, oc & ~near), ""),
-                 f"growth plate = {S}-positive bins within {dist_um:g} um (array grid) of a {P}-dense region "
-                 f"(8-connected {calls or 'no'} bins, >= {min_bins} bins); tumor-associated = the other {S}-positive "
+                 f"{GPn} = {S}-positive bins within {dist_um:g} um (array grid) of a {P}-dense region "
+                 f"(8-connected {calls or 'no'} bins, >= {min_bins} bins); {TA} = the other {S}-positive "
                  f"bins; {within_tumor(oc & near)}")
     masks = st.get("growth_plate_masks") or {}
     if not masks:
         rows.append(_row("drawn", "not configured", "bins",
-                         note="no hand-drawn growth plate (sensitivity_analyses.compartments.growth_plate_masks)"))
+                         note=f"no hand-drawn {GPn} (sensitivity_analyses.compartments.growth_plate_masks)"))
     else:
         try:
             drawn, with_polygons = drawn_growth_plate(a, masks, cfg["roi"].get("mask_frame", "hires"),
@@ -605,9 +608,9 @@ def run(a, cfg, progress=None):
             rows.append(_row("drawn", "not estimable", "bins", note=str(e)))
         else:
             bins_variant("drawn", np.where(tumor, _labels(oc & drawn, oc & ~drawn), ""),
-                         f"growth plate = {S}-positive bins inside the hand-drawn growth-plate polygons "
+                         f"{GPn} = {S}-positive bins inside the hand-drawn {GP} polygons "
                          f"({', '.join(with_polygons) or 'no section'}; {cfg['roi'].get('mask_frame', 'hires')} "
-                         f"frame); tumor-associated = the other {S}-positive bins; {within_tumor(oc & drawn)}")
+                         f"frame); {TA} = the other {S}-positive bins; {within_tumor(oc & drawn)}")
 
     variants = pd.DataFrame(rows, columns=VARIANT_COLUMNS)
     variants["variant"] = pd.Categorical(variants["variant"], categories=list(VARIANTS), ordered=True)
@@ -619,29 +622,29 @@ def run(a, cfg, progress=None):
     unit_txt = "bins (block_pseudobulk: blocks x compartment)"
     return [
         common.Output(DIAG_CSV, "Sensitivity — Figure 4h rule diagnostics",
-                      f"The growth-plate rule of Figure 4h per section and over all bins ('all'): threshold = the "
+                      f"The {GP} rule of Figure 4h per section and over all bins ('all'): threshold = the "
                       f"{cp['percentile']:g}th percentile of the {P} score over all bins and whether it is exactly 0; "
                       f"% of bins above it; bins with >= 1 UMI of a {P} gene ({', '.join(selection) or 'none'}); the "
                       f"compartment sizes, how many lie outside the marrow region of interest, their median UMI per "
-                      f"bin; growth-plate bins with a single {P} UMI and without any {P} core gene.", diag),
-        common.Output(REGIONS_CSV, "Sensitivity — Figure 4h anatomical growth plate",
+                      f"bin; {GP} bins with a single {P} UMI and without any {P} core gene.", diag),
+        common.Output(REGIONS_CSV, f"Sensitivity — Figure 4h anatomical {GPn}",
                       f"{P}-dense regions per section: 8-connected components on the array grid of {calls or 'no'} "
                       f"bins with at least {min_bins} bins (region_sizes, largest first), and the {S}-positive bins "
-                      f"within {dist_um:g} um (array um) of a region bin, of which manuscript growth-plate bins.",
+                      f"within {dist_um:g} um (array um) of a region bin, of which manuscript {GP} bins.",
                       regions),
         common.Output(VARIANTS_CSV, "Sensitivity — Figure 4h variants",
                       f"The Figure 4h test under each variant: status, units ({unit_txt}), units per compartment "
-                      f"(n_group = growth plate, n_rest = tumor-associated), their median UMI per unit as tested "
+                      f"(n_group = {GPn}, n_rest = {TA}), their median UMI per unit as tested "
                       f"(median_umi_group / median_umi_rest: after the depth adjustment of depth_adjusted and "
                       f"block_pseudobulk) and before any adjustment (*_unadjusted), and the genes significantly higher "
                       f"in each compartment (BH-adjusted P < {ALPHA:g}, positive score). The anatomical and drawn "
                       f"variants take both compartments from {tumor_txt} sections. note says what the variant tests.",
                       variants),
         common.Output(DE_CSV, "Sensitivity — Figure 4h DE per variant",
-                      f"Wilcoxon rank-sum (scanpy, BH) growth plate vs tumor-associated per variant, both directions; "
+                      f"Wilcoxon rank-sum (scanpy, BH) {GPn} vs {TA} per variant, both directions; "
                       f"log2fc_mean_cp10k = log2((mean CP10k of the group + 1) / (mean CP10k of the other + 1)); "
                       f"pct_group / pct_rest = % of units detecting the gene; selection_gene = gene of the {P} "
-                      f"extended list (selects the growth-plate bins); depth_adjusted and block_pseudobulk: medians "
+                      f"extended list (selects the {GP} bins); depth_adjusted and block_pseudobulk: medians "
                       f"over {n_reps} depth-adjustment replicates and frac_reps_significant (fraction of replicates "
                       f"significant in the same direction). Genes in the top {TOP_N_DE} of any variant and group or "
                       f"significant in the manuscript variant.", de_out),

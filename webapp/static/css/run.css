@@ -241,6 +241,13 @@
   .tv-layout { grid-template-columns: minmax(0, 1fr); }
   .tv-side { position: static; max-height: none; }
 }
+/* Loupe Browser export above the table browser: a header-only card, its message (saved, or why it was refused) below */
+.run-export .card-header { border-bottom: 0; }
+.run-export .card-header .card-titles { flex: 1 1 300px; }
+.run-export .card-sub { max-width: 860px; }
+.run-export-status { padding: 0 16px 14px; }
+.run-export-status:empty { display: none; }
+.run-export-status p { margin: 0; }
 
 /* ---------------------------------------------------------------- spatial viewer (components/spatial-viewer.js) */
 /* map height: the window less what must be seen with the maps; --sv-lead (space above the first maps) and --sv-row

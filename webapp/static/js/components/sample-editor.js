@@ -479,7 +479,14 @@ export function reportPanel({ report, cfg, checking = false, stale = false, erro
     }
     const rec = (genes.receptor_panel && genes.receptor_panel.missing) || [];
     const adi = (genes.adipocyte_genes && genes.adipocyte_genes.missing) || [];
-    for (const [title, miss] of [['Host receptor panel', rec], ['Adipocyte genes', adi]]) {
+    const ubi = (genes.ubiquitous && genes.ubiquitous.missing) || [];
+    const lists = [['Host receptor panel', rec], ['Adipocyte genes', adi], ['Ubiquitous transcripts', ubi]];
+    // the A549 lesion genes count only while the sensitivity analyses run (they flag no bin when emptied)
+    const sa = cfg && cfg.sensitivity_analyses && cfg.sensitivity_analyses.lesion;
+    if (cfg && cfg.steps && cfg.steps.sensitivity_analyses === true && sa && Array.isArray(sa.genes) && sa.genes.length) {
+      lists.push(['A549 lesion genes', (genes.lesion_genes && genes.lesion_genes.missing) || []]);
+    }
+    for (const [title, miss] of lists) {
       parts.push(h('div', { class: 'report-genes' }, h('span', { class: 'report-genes-title' }, `${title}:`),
         miss.length ? h('div', { class: 'pill-list' }, miss.map((g) => h('span', { class: 'chip no-x bad', title: 'missing from the probe set' }, g)))
           : h('span', { class: 'state ok' }, icon('check', { size: 12 }), 'all present')));

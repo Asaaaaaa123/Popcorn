@@ -23,6 +23,7 @@ const TABS = [
 const SLOW_STEPS = ['moran', 'sensitivity', 'stability'];
 const DEFAULT_BINS = ['002um', '008um', '016um'];
 const VALIDATE_DELAY_MS = 800;
+const DRAFT_CHECK_DELAY_MS = 300;   // the configuration check of the unsaved settings (no data access, fast)
 const RUNS_POLL_MS = 4000;
 
 const drafts = new Map();
@@ -169,6 +170,8 @@ function projectView(container, d, defaults, initialTab) {
   let vOpen = false;
   let validateTimer = null;
   let validateAbort = null;
+  let draftTimer = null;
+  let draftAbort = null;
   const defCfg = (defaults && defaults.config) || {};
 
   // ---------------------------------------------------------------- header
@@ -223,12 +226,44 @@ function projectView(container, d, defaults, initialTab) {
   let chipsSig = '';
   let tabsSig = '';
 
+  // The chips show the check of the unsaved settings while there are any (POST /validate with data: false, a moment
+  // after each change), so that a deleted signature still selected somewhere is an error at once, not after saving.
+  // Until that check answers they show the saved settings' check, and say so.
+  function draftCheck() {
+    return d.dirty && d.draftCheck && d.draftCheck.key === JSON.stringify(d.config) ? d.draftCheck : null;
+  }
+
+  function checkDraftSoon() {
+    clearTimeout(draftTimer);
+    if (d.dirty && !draftCheck()) draftTimer = setTimeout(checkDraft, DRAFT_CHECK_DELAY_MS);
+  }
+
+  async function checkDraft() {
+    if (draftAbort) draftAbort.abort();
+    if (!alive || !d.dirty) return;
+    const ctrl = new AbortController();
+    draftAbort = ctrl;
+    const key = JSON.stringify(d.config);
+    try {
+      const res = await api(`/api/projects/${enc(d.id)}/validate`, { method: 'POST', body: { config: d.config, data: false }, signal: ctrl.signal });
+      d.draftCheck = { key, ...normValidation(res) };
+    } catch (e) {
+      if (e && e.name === 'AbortError') return;
+      d.draftCheck = null;   // the chips keep showing the saved settings' check
+    } finally {
+      if (draftAbort === ctrl) draftAbort = null;
+    }
+    if (alive) paintChips();
+  }
+
   function paintChips() {
-    const { errors, warnings } = d.validation;
-    const sig = JSON.stringify([errors, warnings, vOpen, d.dirty]);
+    const draft = draftCheck();
+    const { errors, warnings } = draft || d.validation;
+    const sig = JSON.stringify([errors, warnings, vOpen, d.dirty, !!draft]);
     if (sig === chipsSig) return;
     chipsSig = sig;
-    const scope = d.dirty ? 'Check of the saved settings; it is updated when you save.' : 'Check of the saved settings.';
+    const scope = draft ? 'Check of your unsaved settings; runs use the saved settings until you save.'
+      : d.dirty ? 'Check of the saved settings; your unsaved changes are being checked.' : 'Check of the saved settings.';
     const chip = (kind, text) => h('button', {
       type: 'button', class: `vchip ${kind}`, 'aria-expanded': String(vOpen), 'aria-controls': vpanelId, title: scope,
       onClick: () => { vOpen = !vOpen; paintChips(); },
@@ -240,7 +275,8 @@ function projectView(container, d, defaults, initialTab) {
     if (vOpen && (errors.length || warnings.length)) {
       mount(vpanel, h('div', { class: 'card-body stack' },
         h('div', { class: 'row between' }, h('h3', null, 'Configuration check'),
-          h('span', { class: 'muted small' }, d.dirty ? 'Saved settings; your unsaved changes are checked when you save.' : 'Saved settings.'),
+          h('span', { class: 'muted small' }, draft ? 'Your unsaved settings; runs use the saved ones until you save.'
+            : d.dirty ? 'Saved settings; your unsaved changes are being checked.' : 'Saved settings.'),
           button({ icon: 'x', kind: 'ghost', small: true, title: 'Close', onClick: () => { vOpen = false; paintChips(); } })),
         errors.length ? banner('danger', [h('strong', null, `${plural(errors.length, 'error')}: runs cannot start until they are fixed.`), h('ul', null, errors.map((t) => h('li', null, t)))]) : null,
         warnings.length ? banner('warning', [h('strong', null, plural(warnings.length, 'warning')), h('ul', null, warnings.map((t) => h('li', null, t)))]) : null));
@@ -290,6 +326,7 @@ function projectView(container, d, defaults, initialTab) {
   function refreshChrome() {
     if (!alive) return;
     computeDirty();
+    checkDraftSoon();
     const named = d.name.trim().length > 0;
     nameInput.classList.toggle('invalid', !named);
     nameInput.title = named ? 'Click to rename' : 'The project needs a name';
@@ -694,6 +731,9 @@ function projectView(container, d, defaults, initialTab) {
     let destroyed = false;
     const cfg = d.config;
     const stepLabels = defaults.step_labels || {};
+    // what each step is for, and which are specific to the bone-lesion study: the "steps" section of PARAM_SCHEMA
+    const stepSpec = (defaults.param_schema || []).find((sec) => sec.key === 'steps');
+    const stepAbout = new Map(((stepSpec && stepSpec.fields) || []).map((f) => [f.key, f]));
     const ui = d.ui;
     const steps = () => (cfg.steps && typeof cfg.steps === 'object' ? cfg.steps : {});
     const stepOn = (k) => (has(ui.runSteps, k) ? ui.runSteps[k] : steps()[k] === true);
@@ -766,22 +806,25 @@ function projectView(container, d, defaults, initialTab) {
 
     function stepRow(k) {
       const label = stepLabels[k] || k;
+      const about = stepAbout.get(k) || {};
+      const bone = about.study === 'bone' ? h('span', { class: 'badge', title: 'Specific to the bone-lesion study of the manuscript (Parameters › Analysis steps)' }, 'bone study') : null;
       if (!SLOW_STEPS.includes(k)) {
         const on = steps()[k] === true;
-        return h('li', { class: on ? 'plan-step' : 'plan-step off' }, icon(on ? 'check' : 'x', { size: 14 }), h('span', null, label));
+        return h('li', { class: on ? 'plan-step' : 'plan-step off', title: about.help || null },
+          icon(on ? 'check' : 'x', { size: 14 }), h('span', null, label), bone);
       }
       const note = h('span', { class: 'muted small' });
       const paintNote = () => {
         note.textContent = has(ui.runSteps, k) ? ` (this run only; project setting: ${steps()[k] === true ? 'on' : 'off'})` : '';
       };
       paintNote();
-      return h('li', { class: 'plan-step slow' }, switchToggle({
+      return h('li', { class: 'plan-step slow', title: about.help || null }, switchToggle({
         checked: stepOn(k), label,
         onChange: (v) => {
           if (v === (steps()[k] === true)) delete ui.runSteps[k]; else ui.runSteps[k] = v;
           paintNote();
         },
-      }), note);
+      }), bone, note);
     }
 
     function planCard() {
@@ -948,6 +991,11 @@ function projectView(container, d, defaults, initialTab) {
   return () => {
     alive = false;
     clearTimeout(validateTimer);
+    clearTimeout(draftTimer);
+    if (draftAbort) {
+      draftAbort.abort();
+      draftAbort = null;
+    }
     if (validateAbort) {
       validateAbort.abort();
       validateAbort = null;

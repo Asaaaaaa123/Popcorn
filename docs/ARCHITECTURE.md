@@ -40,7 +40,10 @@ assignment, `inplace=True` on column subsets, relying on object dtype for string
 `default_config()` returns the manuscript setup. `merge_with_defaults(cfg)`, `validate_config(cfg) -> (errors,
 warnings)`, `effective_config(cfg)` (merge + raise on errors), `load_config`, `save_config`, `resolve_bin_dir(cfg,
 sample, bin_size=None) -> Path|None`, `available_bin_sizes(cfg, sample)`, `bin_um('016um') -> 16.0`, `slugify`,
-`sample_by_id`, `sample_ids`, `signature_label`, `PARAM_SCHEMA`, `STEP_LABELS`, `Progress`.
+`sample_by_id`, `sample_ids`, `signature_label`, `compartment_names(cfg) -> (high, other)` (the Figure 4h compartments
+in figure text and messages: "growth-plate", "tumor-associated" for the manuscript's osteoclast / chondrocyte split,
+else "high-<split_by label>", "low-<split_by label>"; file and column names keep growth_plate / tumor_associated),
+`PARAM_SCHEMA`, `STEP_LABELS`, `Progress`.
 
 Key facts used everywhere:
 * `cfg["samples"]`: ordered list of `{id, label, condition, color, path, microns_per_pixel}`; N >= 1 sections
@@ -56,6 +59,24 @@ Key facts used everywhere:
   ("all" | "tumor").
 * `Progress(events=True)` prints `@@EVENT {json}` lines (plan, step, step_done, skip, warning, done, error) next to
   human-readable lines; `events=False` prints only the readable lines (CLI).
+* Settings that name single signatures are checked against `cfg["signatures"]` (other gene groups, README "Using it
+  for other gene groups"), only while the step that uses them is on. Errors (the run is refused), each naming the
+  setting, its Parameters field and both ways out (another signature, or the step switched off):
+  `compartments.signature` (needs a positivity call) and `compartments.split_by` (steps.compartments),
+  `uncoupling.a` / `.b` (positivity calls; steps.uncoupling). Warnings (the output is skipped): `figures.lineage_maps`
+  unknown or without a call, `figures.composition_signatures` with no known signature (or unknown names), a positivity
+  panel without a called signature, `proximity.pairs` empty (or a pair naming an unknown or, for mode positivity, an
+  uncalled signature), no section whose condition is in `compartments.tumor_conditions`, habitat classes of
+  `sensitivity_analyses.uncoupling` that no tissue-assignment signature has, `sensitivity.signatures` with no known
+  signature while steps.sensitivity is on, `figures.receptor_genes` naming no gene of `receptor_panel` (steps
+  receptor_panel and figures on: Figure 6b is skipped), `sensitivity_analyses.lesion.genes` not empty in a configuration
+  without the osteoclast and osteoblast signatures (steps.sensitivity_analyses on: Krt7 / Krt18 would flag ordinary
+  epithelium as A549 lesion).
+* `STEP_HELP` (what each step is for) and `BONE_STUDY_STEPS` (receptor_panel, adipocyte_panel, compartments,
+  uncoupling, sensitivity: specific to the bone-lesion study). `PARAM_SCHEMA` ends with a section `{"key": "steps"}`
+  that is not a configuration section: one bool field per STEP_LABELS key with its help and `"study": "bone"`; the
+  Analysis steps card and the Run tab read it. Signature fields may carry `"uses_step"` (a steps key) and
+  `"needs_call": true`; `compartments.tumor_conditions` is a str_list field.
 
 ## 2. Python entry points
 
@@ -72,6 +93,17 @@ run_analysis(root, out, roi_masks=None, mask_frame="hires", do_moran=True, do_se
 ```
 CLI (old flags keep working): `python bone_analysis.py --root . --out results [--config cfg.json] [--skip-moran]
 [--geneset-sensitivity] [--project-8um] [--roi-mask SAMPLE=PATH ...] [--mask-frame hires] [--events]`.
+An enabled step that has nothing to compute is reported through `progress.skip(label, reason)`, not as done: Osteoclast
+compartments without `pos_<signature>` / `score_<split_by>`, Distance to nearest partner without the calls of `a` and
+`b`, Proximity tables without pairs, Gene-set sensitivity when `sensitivity.signatures` names no signature (unknown
+names are left out with a warning). Each second-review sensitivity module runs only when the step it re-examines ran
+(positivity; proximity; uncoupling; compartments; leiden and domain_matrix), otherwise a log line says why; the
+uncoupling module also returns nothing, with a warning, when `uncoupling.a` / `.b` have no calls. An empty
+`sensitivity_analyses.lesion.genes` flags no bin and gives no warning; when its genes are found, the log says how many
+bins are flagged, and a configuration without the osteoclast and osteoblast signatures also gets a warning. The Leiden
+step warns when none of `cfg["ubiquitous"]` is in the data (the screen can mark no domain unresolved). The Figure 4h
+warnings and the compartment DE table's description use `pc.compartment_names` and the signature's label
+("<label> compartments: ..."), unchanged for the manuscript configuration.
 Module-level constants (SAMPLES, SIG, PRIMARY, PROGRAMS, RECEPTOR_PANEL, ADIPOCYTE_GENES, UBIQUITOUS, PALETTE,
 UM_PER_PX, MIN_GENES, ...) stay importable; they are derived from / consistent with `pipeline_config.DEFAULT_CONFIG`.
 
@@ -88,6 +120,16 @@ make_figures(results_dir, cfg: dict | None = None, progress: Progress | None = N
 CLI: `python bone_figures.py --results results [--root .] [--config cfg.json] [--manuscript-extras]`.
 `planned_steps(cfg, manuscript_extras=False)` also plans the extras' labels; figure progress labels read
 "Draw Figure …" / "Draw Supplementary Figure …".
+Skipped, with the setting to change in the reason: Figure 3b when `figures.composition_signatures` names no signature
+of the configuration (unknown names are left out), Figure 4a–f when a `figures.lineage_maps` signature is unknown or
+has no call, a positivity panel that names no signature, Figure 6b when `figures.receptor_genes` names no gene of
+`receptor_panel`. A sensitivity figure whose analysis step was switched off says so; the proximity, uncoupling and
+positivity sensitivity figures are skipped when their main table has no rows, the Figure 4h one when
+`sensitivity_Figure4h_top_genes.csv` has none (the Figure 4h test was not estimable: no gene to draw). A positivity
+panel leaves out a signature that could not be scored (mean_score NaN in every section with bins: fewer than two of its
+genes in the data) and names it in the caption; a panel of such signatures only is skipped. Figure 4h and its
+sensitivity figure name the compartments with `pc.compartment_names` (growth plate / tumor-associated only for the
+manuscript's split).
 Figures never read raw Space Ranger data and never need the .h5ad: they read the CSV outputs (the per-bin table has
 coordinates and calls) and `config.json`.
 
@@ -228,16 +270,23 @@ PUT  /api/projects/{pid}    body {"name"?: str, "config"?: dict} -> project + "v
                                400 only when the body is not a JSON object.
 DELETE /api/projects/{pid}  -> {"ok": true}            (runs keep their own snapshot and stay)
 POST /api/projects/{pid}/duplicate -> project          ("<name> (copy)", same config and rois)
-POST /api/projects/{pid}/validate  body {"config"?: dict} (unsaved edits; default = saved config) -> report:
+POST /api/projects/{pid}/validate  body {"config"?: dict (unsaved edits; default = saved config), "data"?: bool}
+     -> report:
      {"ok": bool, "errors": [str], "warnings": [str],
       "samples": [{"id", "bin_dir": str|null, "bin_sizes": ["008um", "016um"], "has_positions": bool,
                    "has_scalefactors": bool, "has_hires_image": bool, "microns_per_pixel": float|null,
                    "n_bins": int|null, "message": str}],
       "genes": {"n_features": int|null,
                 "signatures": {"<name>": {"present": [..], "missing": [..], "core_present": int}},
-                "receptor_panel": {"missing": [..]}, "adipocyte_genes": {"missing": [..]}}}
+                "receptor_panel": {"missing": [..]}, "adipocyte_genes": {"missing": [..]},
+                "ubiquitous": {"missing": [..]}, "lesion_genes": {"missing": [..]}}}
      n_bins / gene names come from filtered_feature_bc_matrix.h5 read with h5py (matrix/shape, matrix/features/name);
-     fast, no scanpy.
+     fast, no scanpy. Warnings for the missing genes of each list; for the ubiquitous transcripts a stronger one when
+     none is present (the Leiden screen marks no domain unresolved); for the A549 lesion genes
+     (sensitivity_analyses.lesion.genes) only when none is present and steps.sensitivity_analyses is on.
+     "data": false -> {"ok", "errors", "warnings"} of the configuration check alone (validate_config, as the project's
+     "validation"; no data access): the project page checks its unsaved settings with it as they change. 400 when
+     "data" is not a boolean.
 POST /api/projects/{pid}/detect-samples  body {"data_root"?: str}
      -> {"data_root": str, "candidates": [{"folder": "SR007144_LL-2-1", "path": "SR007144_LL-2-1/outs/binned_outputs",
          "suggested_id": "LL-2-1", "bin_sizes": ["002um", "008um", "016um"]}]}
@@ -346,6 +395,11 @@ POST /api/runs/{rid}/gene  body {"sample", "genes": [1..50]}  -> sparse gene vec
      /bins order. The raw section is read again from the run's data_root; each per-bin barcode
      (<normalised matrix barcode>-<sample id>, as anndata.concat(index_unique="-") wrote it) is matched to its raw bin
      (fallbacks: as is, then normalised); unmatched bins count 0. 422 when the raw data can no longer be found.
+GET  /api/runs/{rid}/export/loupe  -> application/zip, attachment "<rid>_loupe.zip": the per-bin calls as category CSV
+     files for 10x Genomics Loupe Browser and README.txt (see "Loupe Browser export" below). 404 unknown run or no
+     per-bin table (detail says when the run stopped before writing one); 409 while the run is queued or running; 422
+     when a section's raw data can no longer be found or read, no bin of the table is a barcode of its matrix, a
+     section of the table is not in the run's config, or the run's bins are smaller than 8 µm (no .cloupe exists)
 
 POST /api/demo                  -> {"project": project}   generates workspace/demo_data (once; ~1 min) with
                                    tools.make_demo_data.generate and creates a project "Demo — synthetic tibiae"
@@ -357,6 +411,49 @@ duplicate return the GET shape; PUT of an empty ROI FeatureCollection deletes th
 when `roi.use_drawn` is on and a drawn region's frame differs from `roi.mask_frame` or a mask file is missing; 422 for
 an unreadable data file; `/table` returns at most 1,000 rows per call; in `/bins` a category code of -1 is a missing
 value; `png_url`/`pdf_url` are null when the file is missing; every error `detail` is a string.
+
+Loupe Browser export (`server.loupe_export(df, cfg, bin_size, out, title, source) -> report`, which GET /export/loupe
+calls with the per-bin table, the run's config with an absolute data_root and the bin size of the table's file name):
+* Zip entries, sections in config order: `<sid>_<B>_categories.csv` (the run's bin size, e.g. `016um`); when that is a
+  whole multiple of 8 µm above 8 and the section has square_008um/filtered_feature_bc_matrix.h5, also
+  `<sid>_008um_categories.csv` (Space Ranger writes a Visium HD section's .cloupe file, outs/cloupe_008um.cloupe, at 8 µm
+  only; other sizes need `--custom-bin-size`); then README.txt (plain text: which file goes with which .cloupe file, rows,
+  the parent check, the 8 µm quality control, import steps, the columns, the columns left out, the format choices; the
+  Leiden "unassigned" size is the run's clustering.min_domain_bins). `<sid>` keeps letters, digits, `.`, `_`, `-`.
+* CSV: comma-separated, LF line endings, UTF-8 without BOM, no quoting. Header `barcode`, then one column per category
+  (its header is the name Loupe shows). One row per barcode of that bin size's filtered_feature_bc_matrix.h5, in matrix
+  order and exactly as written there (-1 kept): every bin of the .cloupe file. Every cell holds a label: "not analyzed"
+  in every column (but "8 um QC") when the run has no calls for the bin (per-bin barcodes are matched to the matrix as
+  /gene matches them), "NA" for an analysed bin without a value in that column.
+* Columns (loupe_columns), whatever the configuration: tissue_class "Tissue class", assigned_signature "Assigned
+  signature", leiden_domain "Leiden domain" (a label of digits becomes "domain N"), in_region_of_interest "Region of
+  interest" (inside/outside), then in table order every other yes/no column (positive_* positive/negative, in_*
+  inside/outside, else yes/no) and text column of at most 500 values, headed by its name with spaces and a capital
+  ("Positive osteoblast pooled depthmatched"; a name taken twice gets " 2"). Left out (listed in README.txt): numbers
+  (total_umi, positive_fraction_*, lesion_umi_pooled), sample_id, section, x_um, y_um, empty columns, text columns of
+  more than 500 values, and tissue_class, assigned_signature or leiden_domain beyond 32,766 values (Loupe Browser takes
+  at most 32,768 per category, "NA" and "not analyzed" included). Labels: "," becomes ";", '"' becomes "'", tabs and
+  line breaks become spaces.
+* 8 µm rows take the labels of the run bin that holds them. Parent from the grid indices of the barcodes
+  (s_008um_RRRRR_CCCCC): index * 8 // bin µm, as bone_analysis.map_domains_from_coarser. Checked against the bin centres
+  of both tissue positions files (bins found there by grid key, not by barcode text): the nearest run-bin centre (all
+  bins of the file, in tissue or not) must be the parent's. If any 8 µm centre is nearer another run bin, every 8 µm
+  bin takes the run bin whose centre is nearest (README.txt says so). An 8 µm bin whose parent is not analysed is
+  "not analyzed".
+* The labels of an 8 µm bin are its parent's whatever its own counts, so 8 µm bins that would fail quality control on
+  their own (even bins without a UMI) are labelled too, unlike the analysis' own projection (step project_fine_bins,
+  which keeps the bins that pass). The 8 µm files therefore end with a column "8 um QC" (`matrix_qc`): "pass" or "fail"
+  for every 8 µm bin, from its Gene Expression counts and the run's qc thresholds as `passes_qc` decides them (the
+  explorer's passes_qc; float32 like bone_analysis), read 1,000,000 stored counts at a time; README.txt gives per file
+  how many pass, how many labelled bins fail (and have no UMI) and how many "not analyzed" bins pass. If the counts
+  cannot be read the file is written without the column, with a note. Manuscript data: 115,048 of 223,186 labelled
+  LL-2-1 bins and 154,257 of 373,080 RL-1-5 bins fail (257 and 477 without a UMI), the same as a recount from the
+  matrices.
+* The zip is built in a temporary file (deleted after the response or on error), one CSV at a time; rows with the same
+  labels share one text. Manuscript result (2 sections, 16 µm): 4.4 s, 7.3 MB zip (CSV 14 and 19 MB at 16 µm, 57 and
+  78 MB at 8 µm); the process grows by about 0.45 GB at the peak (working set; measured), mostly while the parent check
+  reads the 8 µm tissue positions file (702,000 rows with their barcodes for RL-1-5) and the 16 µm one, and by up to
+  about 60 MB for the 8 µm quality control. Repeated exports do not accumulate memory.
 
 Security: binds 127.0.0.1 by default. With `--host` other than loopback a token is required (generated if not given and
 printed with the URL); requests carry it as cookie `bss_token` (set by visiting `/?token=...`) or header `X-Token`.
@@ -397,11 +494,32 @@ return a cleanup function (stop timers, remove listeners):
 #/runs                     views/runs.js      export async function renderRuns(container, {})
 #/runs/:id/:tab?           views/run.js       export async function renderRun(container, {id, tab})
                            tabs: progress | summary | figures | tables | viewer | config  (tab null -> progress
-                           while queued/running, summary when finished); viewer = spatialViewer(runSource(id))
+                           while queued/running, summary when finished); viewer = spatialViewer(runSource(id));
+                           tables of a finished run with a per-bin table: a "Loupe Browser" card above the table
+                           browser whose "Export for Loupe Browser" fetches GET /export/loupe and saves the zip, or
+                           shows the server's detail when the export is refused
 #/help/:topic?             views/help.js      export async function renderHelp(container, {topic})
                            topics: guide (default) | changes | architecture | readme
 ```
 Components live in js/components/ and are imported by the views.
+
+### Signatures and Parameters tabs (components/signature-editor.js, components/param-form.js)
+* `deleteSignature(cfg, name)` removes the signature from every list (competitors, primary, programs, roi.exclude,
+  sensitivity sets, positivity panels, composition bars) and drops the proximity pairs that use it; single-signature
+  settings stay. The delete dialog lists `signatureUsage(cfg, name)` -> `[{where, step}]` (the Parameters field that
+  still selects it; step = the steps key that needs it, null for the Figure 4a–f maps), says that the analysis cannot
+  start until another signature is chosen there or the step is switched off, and `deletionEffects(cfg, name)`: lists
+  it empties (composition bars, a positivity panel, roi.exclude, sensitivity.signatures with the step on) and pairs it
+  drops.
+* A signature field shows, under it, why its value cannot be used (unknown, or without a positivity call when
+  `needs_call`), with the same ways out, unless its `uses_step` is off; it is checked again when a step is switched.
+  Empty composition and panel lists say that the figure is not drawn; the Tumor conditions chips are marked when no
+  section has that condition. The Analysis steps card shows each step's help and a "bone study" badge from the
+  schema's "steps" section (the Run tab shows the help as the step's tooltip, and the badge).
+* The configuration-check chips at the top of the project page (and their panel) show the check of the unsaved
+  settings while there are any: POST /validate with "data": false, 300 ms after the last change (aborted when another
+  follows), kept with the JSON of the config it checked; until it answers, and when it fails, they show the saved
+  settings' check and say so. The Run tab and starting a run use the saved settings' check, since runs use those.
 
 ### Spatial viewer (components/spatial-viewer.js, styles in css/run.css)
 ```

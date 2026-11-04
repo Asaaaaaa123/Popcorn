@@ -2,7 +2,7 @@
 // config. The run record is polled every 1.5 s while the run is queued or running. Results are fetched when their tab
 // is first opened and kept in memory while the view lives; they are fetched again once after the run finishes.
 import {
-  h, api, mount, button, icon, card, tabs, statusBadge, loading, emptyState, errorPanel, banner, toast,
+  h, api, apiUrl, mount, button, icon, card, tabs, statusBadge, loading, emptyState, errorPanel, banner, toast,
   confirmDialog, promptDialog, fmt, copyText, navigate, setPathSilently, clone, refreshHealth, state,
 } from '../core.js';
 import { logView, downloadText } from '../components/log-view.js';
@@ -24,6 +24,7 @@ const TABS = [
 const RESULT_TABS = new Set(['summary', 'figures', 'tables', 'viewer']);
 const STEP_TEXT = { pending: 'pending', running: 'running', done: 'done', skipped: 'skipped', failed: 'failed' };
 const WARNINGS_SHOWN = 8;
+const PER_BIN_TABLE = /^per_bin_signature_calls_\d+um\.csv\.gz$/;
 
 const isColor = (c) => typeof c === 'string' && /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i.test(c.trim());
 const numOrNull = (v) => (v === null || v === undefined || v === '' || !Number.isFinite(Number(v)) ? null : Number(v));
@@ -595,11 +596,55 @@ export async function renderRun(container, { id, tab }) {
       };
     }
     const tb = tableBrowser({ runId: id, manifest: m, store: st.tableStore });
+    const perBin = Array.isArray(m.tables) && m.tables.some((t) => t && PER_BIN_TABLE.test(String(t.file)));
     return {
       el: h('div', { class: 'stack' },
-        isActive() ? banner('info', 'The run is still in progress; this list shows the files written so far.') : null, tb.el),
+        isActive() ? banner('info', 'The run is still in progress; this list shows the files written so far.') : null,
+        perBin && !isActive() ? loupeExport() : null, tb.el),
       destroy: tb.destroy,
     };
+  }
+
+  // The per-bin calls as category CSV files for 10x Genomics Loupe Browser (GET /export/loupe, a zip). The zip is
+  // fetched rather than linked, so that a refused export shows the server's reason instead of saving it as a file.
+  function loupeExport() {
+    const fileName = `${id}_loupe.zip`;
+    const status = h('div', { class: 'run-export-status', 'aria-live': 'polite' });
+    async function download() {
+      mount(status);
+      let res;
+      try {
+        res = await fetch(apiUrl(`/api/runs/${enc}/export/loupe`), { credentials: 'same-origin' });
+      } catch {
+        mount(status, banner('danger', 'Cannot reach the server. Is it still running?'));
+        return;
+      }
+      if (!res.ok) {
+        let message = `Request failed (HTTP ${res.status})`;
+        try {
+          const data = await res.json();
+          if (data && typeof data.detail === 'string' && data.detail) message = data.detail;
+        } catch { /* not JSON */ }
+        mount(status, banner('danger', [h('strong', null, 'The export was refused: '), message]));
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const link = h('a', { href: url, download: fileName, hidden: true });
+      document.body.append(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      mount(status, h('p', { class: 'faint small' },
+        `Downloaded ${fileName} (${fmt.bytes(blob.size)}). Its README.txt says which file goes with which section's .cloupe file and how to import it.`));
+    }
+    const el = card({
+      cls: 'run-export', title: 'Loupe Browser',
+      subtitle: 'The calls of every bin (tissue class, signature, Leiden domain, region, positivity) as category CSV files to import into each section’s .cloupe file in 10x Genomics Loupe Browser.',
+      actions: button({ label: 'Export for Loupe Browser', icon: 'download', small: true, onClick: download }),
+    });
+    el.append(status);
+    return el;
   }
 
   function viewerPane() {

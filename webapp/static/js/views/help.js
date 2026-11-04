@@ -80,7 +80,9 @@ const workflow = () => [
     body: [
       h('em', null, 'Summary'), ': bins per section through quality control and the region of interest, and the key numbers with their confidence intervals. ',
       h('em', null, 'Figures'), ': the manuscript figures as PNG and PDF. ',
-      h('em', null, 'Tables'), ': every CSV output, searchable and sortable, plus the AnnData object for further work in Python. ',
+      h('em', null, 'Tables'), ': every CSV output, searchable and sortable, plus the AnnData object for further work in Python; ',
+      h('em', null, 'Export for Loupe Browser'), ' (above the tables) downloads the per-bin calls as category files for 10x Genomics Loupe Browser — the ', code('_008um'),
+      ' file of a section goes into its ', code('outs/cloupe_008um.cloupe'), ', and README.txt in the zip says how to import it. ',
       h('em', null, 'Spatial viewer'), ': every bin at its position, colored by tissue class, assigned signature, Leiden domain, region of interest, a positivity call, the UMI count or the counts of any genes (numbers and counts are colored up to their 99th percentile, marked ≥ in the legend, so that a few extreme bins do not flatten the map); one, two or four panels side by side with linked pan and zoom and, for panels colored by the same gene or number, one shared color scale (Color scales → Shared); yes/no overlays (calls, region of interest, “gene detected”) on top and the H&E image underneath.',
     ],
   },
@@ -92,6 +94,16 @@ const workflow = () => [
       code('config.json'), ' (which also drives the command-line scripts described in the README) or turns it into a new project.',
     ],
   },
+];
+
+// using the app for tissues and signatures other than the bone lesion of the manuscript
+const otherTissues = () => [
+  h('p', null, 'The defaults are the manuscript’s: mouse bone and marrow signatures (Table 1) and a few steps built around osteoclasts and osteoblasts in an A549 bone lesion. The rest — quality control, Leiden domains, signature scores and positivity calls, depth matching, the region of interest, the tissue assignment and composition, Moran’s I, the per-bin table, the summary and the maps — works with any gene signatures.'),
+  h('ol', null,
+    h('li', null, h('strong', null, 'Signatures tab. '), 'Delete the signatures you do not need and add your own: scored genes, core genes (at least scoring.min_core of them must be detected for a positive call), competing signatures, and the switches ', h('em', null, 'Positivity call'), ' and ', h('em', null, 'Tissue assignment'), '. Replace the tissue classes, the host receptor panel and the adipocyte genes, or leave them. After a data check the gene chips show which genes are in the probe set.'),
+    h('li', null, h('strong', null, 'Configuration check. '), 'Settings that still name a deleted signature are listed with the field to change. The Figure 4h compartments and the Figure 4i distance need signatures with a positivity call: choose yours under Parameters, or switch the steps off under Parameters → Analysis steps (they are marked “bone study”); until then the analysis cannot start. Figures whose signature lists are empty (composition bars, positivity panels, the Figure 4a–f maps) are not drawn: choose their signatures under Parameters → Figures.'),
+    h('li', null, h('strong', null, 'Steps of the bone study. '), 'The host receptor panel (Figure 6b), the adipocyte genes (Supplementary Figure S4), the osteoclast compartments (Figure 4h), the distance to the nearest partner (Figure 4i; osteoblast to osteoclast in the manuscript) and the three-gene-set sensitivity follow the manuscript; each has a switch under Analysis steps. With a receptor panel of your own, also choose the genes Figure 6b draws (Parameters → Figures). With other signatures, Figure 4h calls its two compartments high-<split signature> and low-<split signature> instead of growth plate and tumor-associated. Under the sensitivity analyses, empty the A549 lesion genes (Krt7 and Krt18 are ordinary epithelial genes elsewhere) and set the habitat classes of Figure 4i to your own tissue classes. Sections count as tumor sections when their condition is listed under Osteoclast compartments → Tumor conditions.'),
+    h('li', null, h('strong', null, 'Gene names. '), 'They must match the probe set exactly: the defaults are mouse symbols (', code('Lyz2'), ', ', code('Ptprc'), '), so human data needs human symbols (', code('LYZ'), ', ', code('PTPRC'), '), also in the ubiquitous transcripts of the Leiden screen (Signatures tab). Mitochondrial genes are recognised by the prefix ', code('mt-'), ' in any case, so ', code('MT-'), ' works too.')),
 ];
 
 const GLOSSARY = [
@@ -130,6 +142,7 @@ function guide() {
       h('a', { class: 'btn', href: '#/runs' }, icon('activity', { size: 16 }), 'See runs')),
     guideSection('workflow', 'Workflow',
       h('ol', { class: 'help-steps' }, workflow().map((s) => h('li', null, h('h3', null, s.title), h('p', null, s.body))))),
+    guideSection('other-tissues', 'Other tissues and gene signatures', otherTissues()),
     guideSection('glossary', 'Glossary',
       h('dl', { class: 'help-glossary' }, GLOSSARY.map(([term, text]) => [h('dt', null, term), h('dd', null, text)]))),
     guideSection('shortcuts', 'Mouse and keyboard',

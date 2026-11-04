@@ -1,19 +1,48 @@
 // param-form.js — the Parameters tab: one card per PARAM_SCHEMA section (a control per field type, inline invalid
-// state, reset to the default), then proximity pairs, figure options, analysis steps and reproducibility.
-// Every edit changes the draft configuration in place and calls onChange().
+// state, reset to the default), then proximity pairs, figure options, analysis steps (with the help of the schema's
+// "steps" section) and reproducibility. Every edit changes the draft configuration in place and calls onChange().
 import { h, mount, icon, card, switchToggle, button, clone } from '../core.js';
 import { chipInput, chipSelect, signatureOptions, optionLabel, iconButton, parseTokens, uniqueList } from './chips.js';
 
 let seq = 0;
 const nextId = (prefix) => `${prefix}-${++seq}`;
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const has = (o, k) => !!o && Object.prototype.hasOwnProperty.call(o, k);
 const PANEL_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
+
+// chip classes of fields that need the configuration (the schema carries no functions)
+const sectionConditions = (ctx) => new Set((Array.isArray(ctx.cfg.samples) ? ctx.cfg.samples : []).map((s) => s && s.condition));
+const FIELD_EXTRAS = {
+  'compartments.tumor_conditions': (ctx) => ({
+    classify: (c) => (sectionConditions(ctx).has(c) ? 'ok' : 'warn'),
+    describe: (c) => (sectionConditions(ctx).has(c) ? 'The condition of a section' : 'No section has this condition (Data tab)'),
+  }),
+};
+
+/**
+ * Why the signature chosen in a signature field cannot be used: '' when it can, or when the step that uses it
+ * (spec.uses_step) is switched off. spec.needs_call: it must have a positivity call; spec.consequence: what happens
+ * meanwhile when no step uses it (otherwise the analysis cannot start: validate_config reports an error).
+ */
+function signatureProblem(spec, cur, ctx) {
+  const cfg = ctx.cfg;
+  const steps = cfg.steps && typeof cfg.steps === 'object' ? cfg.steps : {};
+  const step = spec.uses_step;
+  if (step && steps[step] !== true) return '';
+  const known = typeof cur === 'string' && has(cfg.signatures, cur);
+  if (known && (!spec.needs_call || (Array.isArray(cfg.primary) && cfg.primary.includes(cur)))) return '';
+  const stepOff = step ? `, or switch off the step “${ctx.stepLabels[step] || step}” under Analysis steps` : '';
+  const until = step ? 'the analysis cannot start' : (spec.consequence || 'it is not used');
+  return known
+    ? `${cur} has no positivity call: switch it on in the Signatures tab, or choose another signature${stepOff}. Until then ${until}.`
+    : `Not a signature of this project: choose another one${stepOff}. Until then ${until}.`;
+}
 
 const FIGURE_FIELDS = [
   { key: 'dpi', label: 'Figure resolution (dpi)', type: 'int', min: 50, max: 1200, help: 'Resolution of the PNG files.' },
   { key: 'map_dpi', label: 'Spatial map resolution (dpi)', type: 'int', min: 50, max: 1200, help: 'Resolution of the per-bin maps (Figures 3a and 4a–f).' },
   { key: 'moran_top_n', label: 'Genes shown in Supplementary Figure S2', type: 'int', min: 1, max: 500 },
-  { key: 'receptor_shade_first_two', label: 'Shade the first two receptor genes (Figure 6b)', type: 'bool' },
+  { key: 'receptor_shade_first_two', label: 'Shade the first two receptor genes (Figure 6b)', type: 'bool', help: 'Marks RANKL and OPG, the first two genes of the default list; switch it off for other genes.' },
 ];
 const REPRO_FIELDS = [
   { key: 'seed', label: 'Random seed', type: 'int', min: 0, max: 2147483647, help: 'Seeds every random step: subsampling, null gene sets, Leiden and random placement.' },
@@ -166,17 +195,19 @@ function makeField(spec, acc, ctx) {
         const known = options.some((o) => o.value === cur);
         mount(sel, known ? null : h('option', { value: cur ?? '', selected: true }, cur ? `${cur} (unknown signature)` : '(none)'),
           options.map((o) => h('option', { value: o.value, selected: o.value === cur }, optionLabel(o))));
-        sel.classList.toggle('invalid', !known);
-        sel.title = known ? '' : 'Not a signature of this project: the step is skipped';
+        const msg = signatureProblem(spec, cur, ctx);
+        setError(msg, sel);
+        sel.title = msg;
       };
       sel.addEventListener('change', () => { write(sel.value); show(); });
+      ctx.refreshers.push(() => show());          // the step switches and the signatures decide the message
       control = sel;
       break;
     }
     case 'signature_list': {
       const cs = chipSelect({
         options: signatureOptions(ctx.cfg), values: acc.get() || [], id, label: spec.label, placeholder: 'Add a signature…',
-        unknownText: 'not a signature of this project', onChange: (v) => write(v),
+        unknownText: 'not a signature of this project', emptyText: spec.emptyText, onChange: (v) => write(v),
       });
       show = () => cs.set(acc.get() || []);
       control = cs.el;
@@ -262,7 +293,7 @@ function pairsSection(ctx) {
     mount(body, list.length ? h('div', { class: 'table-wrap' }, h('table', { class: 'table compact pf-pairs' },
       h('thead', null, h('tr', null, h('th', null, 'From'), h('th', null, h('span', { class: 'sr-only' }, 'to')), h('th', null, 'To'),
         h('th', null, 'Counted by'), h('th', null, 'Output table'), h('th', null, h('span', { class: 'sr-only' }, 'Remove')))),
-      h('tbody', null, rows))) : h('p', { class: 'muted' }, 'No proximity pairs: no proximity table is written.'),
+      h('tbody', null, rows))) : h('p', { class: 'muted' }, 'No proximity pairs: no proximity table is written, and the step “Proximity tables” is skipped.'),
     h('div', { class: 'row' }, add));
     if (focusAdd) add.focus();
   };
@@ -300,6 +331,7 @@ function panelsEditor(ctx, onPanelsChange) {
       const sigs = chipSelect({
         options: signatureOptions(ctx.cfg), values: p.signatures || [], label: `Signatures of panel ${i + 1}`,
         placeholder: 'Add a signature…', unknownText: 'not a signature of this project',
+        emptyText: 'No signature: this panel is not drawn',
         onChange: (v) => { p.signatures = v; changed(); },
       });
       return h('div', { class: 'pf-panel' },
@@ -344,45 +376,62 @@ function figuresSection(ctx) {
   syncPanelsReset();
   const receptorSpec = {
     key: 'receptor_genes', label: 'Receptor genes shown in Figure 6b', type: 'str_list',
-    help: 'Genes of the host receptor panel (Signatures tab), in drawing order.',
+    help: 'Genes of the host receptor panel (Signatures tab), in drawing order. With a panel of your own, list its genes here: Figure 6b is not drawn when none of these is in the panel.',
     classify: (g) => (ctx.cfg.receptor_panel && Object.prototype.hasOwnProperty.call(ctx.cfg.receptor_panel, g) ? '' : 'warn'),
     describe: (g) => (ctx.cfg.receptor_panel && Object.prototype.hasOwnProperty.call(ctx.cfg.receptor_panel, g)
       ? ctx.cfg.receptor_panel[g] : 'Not in the host receptor panel: the figure has no data for this gene'),
   };
+  const lineageSpec = (key, label) => ({ key, label, type: 'signature', needs_call: true, consequence: 'Figure 4a–f is not drawn' });
   const body = h('div', { class: 'stack-lg' },
     h('div', { class: 'stack' },
       h('div', { class: 'row between' }, h('h3', null, 'Positivity panels'), panelsReset),
-      h('p', { class: 'muted small' }, 'One figure per panel (defaults: Figures 4g and 6a): the percentage of positive bins of each signature, per section.'),
+      h('p', { class: 'muted small' }, 'One figure per panel (defaults: Figures 4g and 6a): the percentage of positive bins of each signature, per section. A panel without a signature that has a positivity call is not drawn.'),
       panels.el),
     h('div', { class: 'form-grid pf-grid' },
       makeField(receptorSpec, fig('receptor_genes'), ctx).el,
-      makeField({ key: 'composition_signatures', label: 'Signatures in the composition bars (Figure 3b)', type: 'signature_list' }, fig('composition_signatures'), ctx).el,
-      makeField({ key: 'a', label: 'Figure 4a–f: first signature (blue)', type: 'signature' }, lineage('a'), ctx).el,
-      makeField({ key: 'b', label: 'Figure 4a–f: second signature (red)', type: 'signature' }, lineage('b'), ctx).el,
+      makeField({
+        key: 'composition_signatures', label: 'Signatures in the composition bars (Figure 3b)', type: 'signature_list',
+        emptyText: 'None selected: Figure 3b is not drawn',
+      }, fig('composition_signatures'), ctx).el,
+      makeField(lineageSpec('a', 'Figure 4a–f: first signature (blue)'), lineage('a'), ctx).el,
+      makeField(lineageSpec('b', 'Figure 4a–f: second signature (red)'), lineage('b'), ctx).el,
       FIGURE_FIELDS.map((f) => makeField(f, fig(f.key), ctx).el)));
   return section('Figures', 'What bone_figures.py draws after the analysis.', body);
 }
 
-function stepsSection(ctx, stepLabels) {
+/** stepFields: the fields of the schema's "steps" section ({key, help, study}), the help shown under each switch. */
+function stepsSection(ctx, stepLabels, stepFields) {
   const grid = h('div', { class: 'pf-steps' });
   const defaults = ctx.defaults.steps || {};
+  const about = new Map((stepFields || []).map((f) => [f.key, f]));
+  const changed = () => { ctx.onChange(); syncRestore(); ctx.refreshers.forEach((f) => f()); };
   const restore = button({
     label: 'Restore defaults', icon: 'undo', small: true, kind: 'ghost',
-    onClick: () => { ctx.cfg.steps = clone(defaults); ctx.onChange(); paint(); },
+    onClick: () => { ctx.cfg.steps = clone(defaults); paint(); changed(); },
   });
   const paint = () => {
     const steps = obj(ctx.cfg, 'steps');
     const keys = uniqueList([...Object.keys(defaults), ...Object.keys(steps)]);
-    mount(grid, keys.map((k) => h('div', { class: 'pf-step', title: `steps.${k}` }, switchToggle({
-      checked: steps[k] === true, label: stepLabels[k] || k,
-      onChange: (v) => { obj(ctx.cfg, 'steps')[k] = v; ctx.onChange(); syncRestore(); },
-    }))));
+    mount(grid, keys.map((k) => {
+      const f = about.get(k) || {};
+      const helpId = f.help ? nextId('ps') : null;
+      const toggle = switchToggle({
+        checked: steps[k] === true, label: stepLabels[k] || k,
+        onChange: (v) => { obj(ctx.cfg, 'steps')[k] = v; changed(); },
+      });
+      if (helpId) toggle.querySelector('input').setAttribute('aria-describedby', helpId);
+      return h('div', { class: 'field pf-step', title: `steps.${k}` },
+        h('div', { class: 'row' }, toggle,
+          f.study === 'bone' ? h('span', { class: 'badge', title: 'Specific to the bone-lesion study of the manuscript' }, 'bone study') : null),
+        f.help ? h('div', { class: 'help', id: helpId }, f.help) : null);
+    }));
     syncRestore();
   };
   const syncRestore = () => restore.classList.toggle('hidden', same(obj(ctx.cfg, 'steps'), defaults));
   paint();
   return section('Analysis steps', 'Steps that are switched off are skipped; their tables and figures are not written. '
-    + 'The Run tab can switch the slow steps for a single run.', grid, restore);
+    + 'Steps marked “bone study” are specific to the bone-lesion study of the manuscript: for other tissues, point '
+    + 'their settings at your own signatures or switch them off. The Run tab can switch the slow steps for a single run.', grid, restore);
 }
 
 function reproSection(ctx) {
@@ -391,14 +440,21 @@ function reproSection(ctx) {
 }
 
 /**
- * The whole Parameters tab. schema = PARAM_SCHEMA, defaults = the default configuration, stepLabels = STEP_LABELS.
- * Returns {el}.
+ * The whole Parameters tab. schema = PARAM_SCHEMA (its "steps" section only gives the help of the Analysis steps
+ * card), defaults = the default configuration, stepLabels = STEP_LABELS. Returns {el}.
  */
 export function paramForm({ cfg, defaults, schema, stepLabels, onChange }) {
-  const ctx = { cfg, defaults: defaults || {}, onChange: onChange || (() => {}) };
-  const sections = (schema || []).map((sec) => section(sec.title, sec.description,
-    h('div', { class: 'form-grid pf-grid' }, (sec.fields || []).map((f) => makeField(f, accessor(ctx, sec.key, f.key), ctx).el))));
-  sections.push(pairsSection(ctx), figuresSection(ctx), stepsSection(ctx, stepLabels || {}), reproSection(ctx));
+  // refreshers: show() of the signature fields, run again when a step is switched (their message depends on it)
+  const ctx = { cfg, defaults: defaults || {}, onChange: onChange || (() => {}), stepLabels: stepLabels || {}, refreshers: [] };
+  const stepSpec = (schema || []).find((sec) => sec.key === 'steps');
+  const field = (sec, f) => {
+    const extra = FIELD_EXTRAS[`${sec.key}.${f.key}`];
+    return makeField(extra ? { ...f, ...extra(ctx) } : f, accessor(ctx, sec.key, f.key), ctx).el;
+  };
+  const sections = (schema || []).filter((sec) => sec !== stepSpec).map((sec) => section(sec.title, sec.description,
+    h('div', { class: 'form-grid pf-grid' }, (sec.fields || []).map((f) => field(sec, f)))));
+  sections.push(pairsSection(ctx), figuresSection(ctx), stepsSection(ctx, ctx.stepLabels, stepSpec && stepSpec.fields),
+    reproSection(ctx));
   const nav = h('nav', { class: 'pf-nav', 'aria-label': 'Parameter sections' },
     sections.map((s) => h('button', {
       type: 'button', class: 'pf-nav-item',

@@ -199,7 +199,7 @@ def scoring_signatures(cfg, names):
     sig = cfg["signatures"]
     keep = []
     for n in names:
-        for k in [n, *(sig[n].get("competes") or [])]:
+        for k in [n, *((sig.get(n) or {}).get("competes") or [])]:
             if k in sig and k not in keep:
                 keep.append(k)
     return {k: {"core": list(sig[k]["core"]), "extended": list(sig[k]["extended"]),
@@ -299,9 +299,16 @@ def _csr_with_p_less(light, A, B, xy_all, roi, smp, samples, unc, ref, seed, bin
 def run(a, cfg, progress=None):
     """Figure 4i under the configured null models, call sets and depth-matching draws, and the stability of the pooled
     depth-matched calls between draws; adds obs columns pooled_dm_pos_frac_<a> and pooled_dm_pos_frac_<b> (fraction of
-    draws in which each bin is called)."""
+    draws in which each bin is called). [APP] Nothing, with a warning, when uncoupling.a or .b is not a signature with
+    calls (pos_<name>); a warning when no tissue-assignment signature has a habitat class."""
     st = common.settings(cfg, "uncoupling")
     unc, seed, ref = cfg["uncoupling"], int(cfg["seed"]), cfg["reference_sample"]
+    uncalled = [n for n in dict.fromkeys([unc["a"], unc["b"]])
+                if n not in cfg["signatures"] or f"pos_{n}" not in a.obs]
+    if uncalled:                                       # [APP] as compartments.run: e.g. a deleted signature
+        common.warn(progress, f"Figure 4i sensitivity needs positivity calls for {unc['a']} and {unc['b']} "
+                              f"({', '.join(uncalled)} has none); skipped")
+        return []
     bin_um = pc.bin_um(cfg["bin_size"])
     min_pos, n_perm = int(unc["min_pos"]), int(st["n_perm"])
     samples = common.sample_ids(a, cfg)
@@ -311,6 +318,11 @@ def run(a, cfg, progress=None):
             models.append(m)
         else:
             common.warn(progress, f"Figure 4i sensitivity: unknown null model {m!r} skipped")
+    if "habitat_fixed_b" in models and not any(cfg["signatures"][n].get("class") in set(st["habitat_classes"])
+                                               for n in cfg["programs"] if n in cfg["signatures"]):
+        common.warn(progress, f"Figure 4i sensitivity: no signature of the tissue assignment has a habitat class "
+                              f"({', '.join(map(str, st['habitat_classes'])) or 'none listed'}), so habitat_fixed_b is "
+                              f"not estimable (sensitivity_analyses.uncoupling.habitat_classes)")
     sets, draws = _call_sets(a, cfg, st, progress)
     if draws is not None:
         for n in dict.fromkeys([unc["a"], unc["b"]]):

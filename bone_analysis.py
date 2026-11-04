@@ -878,7 +878,8 @@ COMPARTMENTS = ["negative", "growth_plate", "tumor_associated", "non_growth_plat
 
 
 def split_osteoclast_compartments(a, pct=90, signature="osteoclast", split_by="chondrocyte",
-                                  tumor_conditions=("tumor",), progress=None):
+                                  tumor_conditions=("tumor",), progress=None, what="osteoclast compartments",
+                                  names=("growth-plate", "tumor-associated")):
     """
     [RUN] Osteoclast-positive bins split by chondrocyte score: above the 90th percentile of all bins = growth-plate
     (chondro-osseous junction) compartment, the rest = tumor-associated (Methods; Figure 4h).
@@ -889,14 +890,15 @@ def split_osteoclast_compartments(a, pct=90, signature="osteoclast", split_by="c
     a warning says when it is 0. The chondrocyte score is zero-inflated (44.5% of the SR007144 bins score exactly 0),
     so its 90th percentile is 0 and 'above the 90th percentile' means a score above 0, which requires at least one UMI
     of a chondrocyte gene (2.1% of bins), not the top 10% of bins.
+    [APP] what, names: how the warnings call the step and the two compartments (pipeline_config.compartment_names).
     """
     split = a.obs[f"score_{split_by}"].to_numpy(dtype=float)
     thr = float(np.nanpercentile(split, pct)) if not np.isnan(split).all() else np.nan
     gp = split > thr if np.isfinite(thr) else np.zeros(a.n_obs, dtype=bool)
     a.uns["compartment_threshold"] = thr
     if thr == 0:
-        _warn(progress, f"osteoclast compartments: the {pct:g}th percentile of the {split_by} score is 0 "
-                        f"({100 * float(np.mean(split == 0)):.1f}% of bins score exactly 0), so the growth-plate rule "
+        _warn(progress, f"{what}: the {pct:g}th percentile of the {split_by} score is 0 "
+                        f"({100 * float(np.mean(split == 0)):.1f}% of bins score exactly 0), so the {names[0]} rule "
                         f"is a {split_by} score above 0, i.e. at least one UMI of a {split_by} gene "
                         f"({100 * float(np.mean(gp)):.1f}% of bins)")
     a.obs["growth_plate"] = gp
@@ -910,7 +912,8 @@ def split_osteoclast_compartments(a, pct=90, signature="osteoclast", split_by="c
     return a
 
 
-def compare_osteoclast_states(a, sections="all", tumor_conditions=("tumor",), selection_genes=(), progress=None):
+def compare_osteoclast_states(a, sections="all", tumor_conditions=("tumor",), selection_genes=(), progress=None,
+                              what="osteoclast compartments", names=("growth-plate", "tumor-associated")):
     """
     [SHAMIM, MODIFIED] step 10 (Wilcoxon rank-sum, BH-adjusted), applied to the two osteoclast compartments
     instead of Leiden clusters, on the full log-normalized matrix.
@@ -923,6 +926,7 @@ def compare_osteoclast_states(a, sections="all", tumor_conditions=("tumor",), se
     expm1(lognorm); pct_group and pct_rest, the percentage of bins detecting the gene in each; and selection_gene, True
     for the genes that define the split (selection_genes: the split_by signature's scored genes), which are higher in
     the growth-plate compartment by construction. Scores and P values are unchanged. Columns: COMPARTMENT_DE_COLUMNS.
+    [APP] what, names: as in split_osteoclast_compartments.
     """
     comp = a.obs["oc_compartment"].astype(str)
     mask = comp.isin(["growth_plate", "tumor_associated"]).to_numpy()
@@ -930,7 +934,7 @@ def compare_osteoclast_states(a, sections="all", tumor_conditions=("tumor",), se
         mask &= a.obs["condition"].astype(str).isin(list(tumor_conditions)).to_numpy()
     n = comp[mask].value_counts()
     if n.get("growth_plate", 0) < 2 or n.get("tumor_associated", 0) < 2:
-        _warn(progress, f"osteoclast compartments: growth-plate {int(n.get('growth_plate', 0))} and tumor-associated "
+        _warn(progress, f"{what}: {names[0]} {int(n.get('growth_plate', 0))} and {names[1]} "
                         f"{int(n.get('tumor_associated', 0))} bins; at least two of each are needed, no test")
         return pd.DataFrame(columns=COMPARTMENT_DE_COLUMNS)
     X = sp.csr_matrix(a.layers["lognorm"][mask])
@@ -988,11 +992,13 @@ def compartment_summary(a, roi_key="in_marrow_roi", samples=None):
 # ============================================================================
 
 def receptor_panel(a, panel=RECEPTOR_PANEL, n_reps=5, control="LL-2-1", tumour="RL-1-5", roi_key="in_marrow_roi",
-                   reference=None, mode="cap", seed=RANDOM_SEED, target_sum=1e4, samples=None, progress=None):
+                   reference=None, mode="cap", seed=RANDOM_SEED, target_sum=1e4, samples=None, progress=None,
+                   name="panel"):
     """
     [RUN] Percentage of ROI bins detecting each gene, raw and after depth matching (same downsampling as
     depth_matched(), five replicates), with Wilson intervals on the depth-matched rate. Used for the host receptor panel
-    (Figure 6b) and, with panel=ADIPOCYTE_GENES, for Supplementary Figure S4.
+    (Figure 6b) and, with panel=ADIPOCYTE_GENES, for Supplementary Figure S4. [APP] name: the panel named in the
+    warning about absent genes.
     [FIX] fold_dm is computed for every section against the reference section (the control and tumour ids were
     hard-coded); a section without ROI bins gives NaN instead of crashing; the expression values are no longer added to
     a.obs as expr_<gene> columns (they bloated the h5ad); depth matching uses the per-bin subsampling of
@@ -1004,7 +1010,7 @@ def receptor_panel(a, panel=RECEPTOR_PANEL, n_reps=5, control="LL-2-1", tumour="
     genes = [g for g in panel if g in a.var_names]
     missing = [g for g in panel if g not in a.var_names]
     if missing:
-        _warn(progress, f"panel genes absent from the data and left out: {', '.join(missing)}")
+        _warn(progress, f"{name}: {', '.join(missing)} absent from the data and left out")
     gi = a.var_names.get_indexer(genes)
     raw = a.layers["lognorm"][:, gi]
     raw = raw.toarray() if sp.issparse(raw) else np.asarray(raw)
@@ -1629,13 +1635,18 @@ def _run(cfg, out, progress):
     W.add("config.json", "data", "Configuration", "The effective configuration of this run (pipeline_config.py).")
     done, tables = set(), {}
 
-    def begin(key, needs=()):
+    def begin(key, needs=(), unavailable=None):
+        # unavailable: why an enabled step whose inputs exist has nothing to compute (e.g. its signatures have no
+        # calls); it is skipped with that reason instead of reported as done ([APP] 2026-11-03)
         if not enabled[key]:
             progress.skip(label[key], "disabled in the configuration")
             return False
         missing = [label[n] for n in needs if n not in done]
         if missing:
             progress.skip(label[key], "needs " + "; ".join(missing))
+            return False
+        if unavailable:
+            progress.skip(label[key], unavailable)
             return False
         progress.step(label[key])
         return True
@@ -1718,13 +1729,14 @@ def _run(cfg, out, progress):
         panel_kw = dict(n_reps=sco["n_depth_reps"], reference=ref, mode=mode, seed=seed, target_sum=target_sum,
                         samples=samples, progress=progress)
         if begin("receptor_panel"):
-            tables["receptor"] = W.csv(receptor_panel(a, cfg["receptor_panel"], **panel_kw),
+            tables["receptor"] = W.csv(receptor_panel(a, cfg["receptor_panel"], name="host receptor panel", **panel_kw),
                                        "Figure6b_receptor_panel_depth_matched.csv", "Host receptor panel",
                                        "Percentage of ROI bins detecting each receptor-panel gene, raw and depth-matched "
                                        "(mean of the replicates, Wilson 95% interval); fold_dm vs the reference section.")
             done.add("receptor_panel")
         if begin("adipocyte_panel"):
-            W.csv(receptor_panel(a, {g: "adipocyte" for g in cfg["adipocyte_genes"]}, **panel_kw),
+            W.csv(receptor_panel(a, {g: "adipocyte" for g in cfg["adipocyte_genes"]}, name="adipocyte genes",
+                                 **panel_kw),
                   "FigureS4_adipocyte_genes_depth_matched.csv", "Adipocyte genes",
                   "Detection of the adipocyte genes in ROI bins, raw and depth-matched (Supplementary Figure S4).")
             done.add("adipocyte_panel")
@@ -1749,6 +1761,11 @@ def _run(cfg, out, progress):
 
         # ---- 7. Leiden domain markers and post-processing ------------------------ [SHAMIM, MODIFIED] steps 10-11; [RUN]
         if begin("leiden", ("normalize",)):
+            if cfg["ubiquitous"] and not any(g in a.var_names for g in cfg["ubiquitous"]):
+                # [APP] e.g. the default mouse symbols on human data: the screen would mark no domain unresolved
+                _warn(progress, f"Leiden screen: none of the {len(cfg['ubiquitous'])} ubiquitous transcripts is in "
+                                f"the data, so no domain can be marked unresolved: list the abundant housekeeping "
+                                f"transcripts of your data (Signatures tab, Ubiquitous transcripts)")
             de = domain_markers(a, n_top=clu["n_top_markers"], progress=progress)
             screen = W.csv(domain_screen(a, de, n_top=clu["screen_top"], ubiquitous=set(cfg["ubiquitous"]),
                                          genes_per_umi=clu["screen_genes_per_umi"],
@@ -1763,26 +1780,30 @@ def _run(cfg, out, progress):
             done.add("leiden")
 
         # ---- 8. osteoclast compartments (Figure 4h) ------------------------------- [RUN]; test [SHAMIM, MODIFIED] step 10
-        if begin("compartments"):
-            cp = cfg["compartments"]
-            if f"pos_{cp['signature']}" not in a.obs or f"score_{cp['split_by']}" not in a.obs:
-                _warn(progress, f"osteoclast compartments need a positivity call for {cp['signature']} and a score for "
-                                f"{cp['split_by']}; no test")
-            else:
-                a = split_osteoclast_compartments(a, cp["percentile"], cp["signature"], cp["split_by"],
-                                                  cp["tumor_conditions"], progress)
-                W.csv(compare_osteoclast_states(a, cp["de_sections"], cp["tumor_conditions"],
-                                                cfg["signatures"][cp["split_by"]]["extended"], progress),
-                      "Figure4h_osteoclast_compartment_DE.csv", "Osteoclast compartment DE",
-                      "Wilcoxon rank-sum, growth-plate vs tumor-associated osteoclast-positive bins (Figure 4h), "
-                      "with log2 fold change of mean CP10k, % of bins detecting each gene, and selection_gene (genes "
-                      "of the split signature, higher in the growth-plate compartment by construction).")
-                W.csv(compartment_summary(a, samples=samples), "Figure4h_compartment_summary.csv",
-                      "Osteoclast compartments as computed",
-                      f"Per section and overall: the {cp['split_by']} score threshold actually used (the "
-                      f"{cp['percentile']:g}th percentile of all bins; 0 means at least one UMI of a {cp['split_by']} "
-                      f"gene), % of bins above it, bins per compartment, compartment bins outside the region of "
-                      f"interest and median UMI per bin of each compartment (Figure 4h).")
+        cp = cfg["compartments"]
+        # [APP] a signature without calls (validate_config refuses it while the step is on): skipped, not done
+        no_split = (None if f"pos_{cp['signature']}" in a.obs and f"score_{cp['split_by']}" in a.obs else
+                    f"needs a positivity call for {cp['signature']} and a score for {cp['split_by']} (Parameters > "
+                    f"Osteoclast compartments)")
+        if begin("compartments", unavailable=no_split):
+            # [APP] the manuscript's compartment names only for its osteoclast / chondrocyte split
+            gp_name, ta_name = names = pc.compartment_names(cfg)
+            S = pc.signature_label(cfg, cp["signature"])
+            a = split_osteoclast_compartments(a, cp["percentile"], cp["signature"], cp["split_by"],
+                                              cp["tumor_conditions"], progress, f"{S} compartments", names)
+            W.csv(compare_osteoclast_states(a, cp["de_sections"], cp["tumor_conditions"],
+                                            cfg["signatures"][cp["split_by"]]["extended"], progress,
+                                            f"{S} compartments", names),
+                  "Figure4h_osteoclast_compartment_DE.csv", "Osteoclast compartment DE",
+                  f"Wilcoxon rank-sum, {gp_name} vs {ta_name} {S}-positive bins (Figure 4h), "
+                  f"with log2 fold change of mean CP10k, % of bins detecting each gene, and selection_gene (genes "
+                  f"of the split signature, higher in the {gp_name} compartment by construction).")
+            W.csv(compartment_summary(a, samples=samples), "Figure4h_compartment_summary.csv",
+                  "Osteoclast compartments as computed",
+                  f"Per section and overall: the {cp['split_by']} score threshold actually used (the "
+                  f"{cp['percentile']:g}th percentile of all bins; 0 means at least one UMI of a {cp['split_by']} "
+                  f"gene), % of bins above it, bins per compartment, compartment bins outside the region of "
+                  f"interest and median UMI per bin of each compartment (Figure 4h).")
             done.add("compartments")
 
         # ---- 9. deterministic tissue assignment (Figure 3) ------------------------ [RUN]
@@ -1821,21 +1842,21 @@ def _run(cfg, out, progress):
         # ---- 11. spatial analyses -------------------------------------------------- [RUN]; Moran [SHAMIM, MODIFIED] step 13
         unc = cfg["uncoupling"]
         prefix = {"pooled_dm": "pooled_dm_", "pooled": "pooled_", "native": ""}[unc["calls"]]
-        if begin("uncoupling", ("assignment",) if prefix else ()):
-            if f"{prefix}pos_{unc['a']}" not in a.obs or f"{prefix}pos_{unc['b']}" not in a.obs:
-                _warn(progress, f"distance to nearest partner: {unc['a']} and {unc['b']} need positivity calls")
-            else:
-                summ, dist = uncoupling_metric(a, f"{prefix}pos_{unc['a']}", f"{prefix}pos_{unc['b']}",
-                                               bin_um=pc.bin_um(cfg["bin_size"]), n_perm=unc["n_perm"],
-                                               min_pos=unc["min_pos"], reference_sample=ref, seed=seed, samples=samples)
-                tables["unc"] = W.csv(summ, "Figure4i_observed_to_null_summary.csv", "Distance to nearest partner",
-                                      "Observed / random-placement mean distance per section, 95% null interval "
-                                      "(Figure 4i).")
-                W.csv(dist, "Figure4i_distance_distributions_observed_and_null.csv", "Distance distributions",
-                      "Distances observed and under the random-placement null (counts per replicate).")
+        no_calls = (None if f"{prefix}pos_{unc['a']}" in a.obs and f"{prefix}pos_{unc['b']}" in a.obs else
+                    f"{unc['a']} and {unc['b']} need positivity calls (Parameters > Distance to nearest partner)")
+        if begin("uncoupling", ("assignment",) if prefix else (), unavailable=no_calls):
+            summ, dist = uncoupling_metric(a, f"{prefix}pos_{unc['a']}", f"{prefix}pos_{unc['b']}",
+                                           bin_um=pc.bin_um(cfg["bin_size"]), n_perm=unc["n_perm"],
+                                           min_pos=unc["min_pos"], reference_sample=ref, seed=seed, samples=samples)
+            tables["unc"] = W.csv(summ, "Figure4i_observed_to_null_summary.csv", "Distance to nearest partner",
+                                  "Observed / random-placement mean distance per section, 95% null interval "
+                                  "(Figure 4i).")
+            W.csv(dist, "Figure4i_distance_distributions_observed_and_null.csv", "Distance distributions",
+                  "Distances observed and under the random-placement null (counts per replicate).")
             done.add("uncoupling")
-        if begin("proximity"):
-            prox = cfg["proximity"]
+        prox = cfg["proximity"]
+        no_pairs = None if prox["pairs"] else "no proximity pairs (Parameters > Proximity pairs)"
+        if begin("proximity", unavailable=no_pairs):
             tables["prox"] = []
             for pair in prox["pairs"]:
                 src, dst, pmode = pair["from"], pair["to"], pair["mode"]
@@ -1856,9 +1877,15 @@ def _run(cfg, out, progress):
             W.csv(cons, "FigureS2_spatially_variable_genes_morans_I.csv", "Spatially variable genes",
                   "Genes in the top Moran's I of every section (Supplementary Figure S2).")
             done.add("moran")
-        if begin("sensitivity"):
-            sen = cfg["sensitivity"]
-            W.csv(geneset_sensitivity(a, sco["n_depth_reps"], sen["variants"], sen["signatures"], sen["competitors"],
+        sen = cfg["sensitivity"]
+        tested = [n for n in sen["signatures"] if n in cfg["signatures"]]
+        nothing = None if tested else ("sensitivity.signatures names no signature of this project (it tests the "
+                                       "manuscript's osteoclast and osteoblast gene sets)")
+        if begin("sensitivity", unavailable=nothing):
+            if len(tested) < len(sen["signatures"]):
+                _warn(progress, f"gene-set sensitivity: {', '.join(n for n in sen['signatures'] if n not in tested)} "
+                                f"not a signature of this project; left out")
+            W.csv(geneset_sensitivity(a, sco["n_depth_reps"], sen["variants"], tested, sen["competitors"],
                                       mode=mode, n_perm=sco["n_perm"], n_perm_resampled=sco["n_perm_resampled"],
                                       target_sum=target_sum, samples=samples, **call_kw),
                   "gene_set_sensitivity_three_gene_sets.csv", "Gene-set sensitivity",
@@ -1906,24 +1933,40 @@ def _run(cfg, out, progress):
 
 def _sensitivity_analyses(a, cfg, W, progress, done):
     """[APP] The sensitivity analyses of the second review (bone_sensitivity/; CHANGES.md): first the cross-captured A549
-    lesion flag (obs lesion_umi_pooled, in_lesion), then each module whose inputs exist. A module that fails becomes a
-    warning; the other modules and every manuscript output are unaffected. Returns {file name: table}."""
+    lesion flag (obs lesion_umi_pooled, in_lesion), then each module whose steps ran (`done`). A module that fails
+    becomes a warning; the other modules and every manuscript output are unaffected. Returns {file name: table}."""
     from bone_sensitivity import clustering, common, compartments, positivity, proximity, uncoupling
     les = common.settings(cfg, "lesion")
     pooled, flag, found = common.lesion_signal(a, les["genes"], les["pool_k"], les["min_pooled_umi"])
     a.obs["lesion_umi_pooled"] = pooled                # all 0 / False without the genes (the modules then need not
     a.obs["in_lesion"] = flag                          # recompute and re-warn)
-    if not found:
+    if not les["genes"]:                               # [APP] emptied on purpose (studies without the A549 lesion)
+        print("[sensitivity] no lesion genes configured (sensitivity_analyses.lesion.genes): no bin is flagged as "
+              "lesion")
+    elif not found:
         _warn(progress, f"sensitivity analyses: none of the lesion genes ({', '.join(les['genes'])}) is in the data, "
                         f"so no bin is flagged as lesion")
-    modules = [("positivity", positivity, ("positivity",)), ("proximity", proximity, ()),
-               ("uncoupling", uncoupling, ()), ("compartments", compartments, ()),
+    else:
+        n_flag = int(np.sum(flag))
+        print(f"[sensitivity] A549 lesion flag ({', '.join(found)}): {n_flag:,} of {a.n_obs:,} bins")
+        # [APP] Krt7 / Krt18 are ordinary epithelial genes outside the A549 xenograft: a project without the bone
+        # signatures (validate_config warns too) is told that its flagged bins are not a lesion
+        if n_flag and not any(n in cfg["signatures"] for n in ("osteoclast", "osteoblast")):
+            _warn(progress, f"sensitivity analyses: {n_flag:,} bins express the A549 lesion genes "
+                            f"({', '.join(found)}) and are reported as A549 lesion; unless the tissue holds an A549 "
+                            f"lesion, empty the list in Parameters > Sensitivity analyses: A549 lesion flag")
+    # [APP] each module runs only when the steps it re-examines ran (2026-11-03): switching off Figure 4h, 4i or the
+    # proximity tables also switches off their sensitivity analysis, and a module never meets signatures that a
+    # switched-off step was allowed to leave invalid
+    modules = [("positivity", positivity, ("positivity",)), ("proximity", proximity, ("proximity",)),
+               ("uncoupling", uncoupling, ("uncoupling",)), ("compartments", compartments, ("compartments",)),
                ("clustering", clustering, ("leiden", "domain_matrix"))]
+    labels = {k: lab for k, lab, _ in _steps(cfg)}
     written = {}
     for name, module, needs in modules:
         missing = [n for n in needs if n not in done]
-        if missing:
-            _warn(progress, f"sensitivity analysis {name} skipped: needs the step(s) {', '.join(missing)}")
+        if missing:                                    # the step itself was reported as skipped, with its reason
+            print(f"[sensitivity] {name} skipped: the step(s) {'; '.join(labels[n] for n in missing)} did not run")
             continue
         print(f"[sensitivity] {name}")
         try:
@@ -1981,21 +2024,22 @@ def _sensitivity_metrics(cfg, sens, add):
             add(G, f"{lbl(sig)}: {sl.get(smp, smp)} / reference fold, native depth", m["fold"], "×",
                 f"range {_num(f.min(), 2)}–{_num(f.max(), 2)} over {int(np.isfinite(f).sum())} region, rule and "
                 f"depth-matching variants{ci}")
+    gp_name, ta_name = pc.compartment_names(cfg)
     t = sens.get("sensitivity_Figure4h_diagnostics.csv")
     if t is not None and len(t):
         r = t[t["sample"].astype(str) == "all"]
         if len(r):
             r = r.iloc[0]
-            add(G, "Figure 4h: growth-plate threshold of the split score", r["threshold"], "",
+            add(G, f"Figure 4h: {gp_name} threshold of the split score", r["threshold"], "",
                 f"{_num(r['pct_bins_above_threshold'], 2)}% of bins above it"
                 + ("; the threshold is 0, so the rule is 'at least one UMI of a split gene'"
                    if str(r["threshold_is_zero"]).lower() in ("true", "1") else ""))
     t = sens.get("sensitivity_Figure4h_variants.csv")
     if t is not None and len(t):
         for r in t[t["status"].astype(str) != "not configured"].to_dict("records"):
-            add(G, f"Figure 4h, {r['variant']}: genes significant (growth-plate / tumor-associated)",
+            add(G, f"Figure 4h, {r['variant']}: genes significant ({gp_name} / {ta_name})",
                 r.get("n_significant_growth_plate"), "", f"{r['status']}; {r.get('n_group')} vs {r.get('n_rest')} "
-                f"{r.get('units')}; tumor-associated significant: {r.get('n_significant_tumor_associated')}")
+                f"{r.get('units')}; {ta_name} significant: {r.get('n_significant_tumor_associated')}")
     t = sens.get("sensitivity_leiden_harmony.csv")
     if t is not None and len(t):
         for r in t[t["variant"] == "no_harmony"].to_dict("records"):

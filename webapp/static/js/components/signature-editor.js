@@ -60,19 +60,47 @@ export function renameSignature(cfg, from, to) {
   return true;
 }
 
-/** Settings that name `name` in a single-signature field (they are not cleared by deleteSignature). */
+/**
+ * Settings that name `name` in a single-signature field (deleteSignature leaves them; the Parameters tab changes
+ * them): [{where, step}], where = the field in the Parameters tab, step = the steps key of the step that needs it
+ * (null for the Figure 4a–f maps, which have no step of their own).
+ */
 export function signatureUsage(cfg, name) {
   const out = [];
   const c = cfg.compartments || {};
   const u = cfg.uncoupling || {};
   const lm = (cfg.figures && cfg.figures.lineage_maps) || {};
-  if (c.signature === name) out.push('osteoclast compartments (signature)');
-  if (c.split_by === name) out.push('osteoclast compartments (split by)');
-  if (u.a === name) out.push('distance to nearest partner (from)');
-  if (u.b === name) out.push('distance to nearest partner (to)');
-  if (lm.a === name) out.push('Figure 4a–f (first signature)');
-  if (lm.b === name) out.push('Figure 4a–f (second signature)');
+  const cp = 'Osteoclast compartments (Figure 4h)';
+  const un = 'Distance to nearest partner (Figure 4i)';
+  if (c.signature === name) out.push({ where: `${cp} › Signature split into compartments`, step: 'compartments' });
+  if (c.split_by === name) out.push({ where: `${cp} › Split by the score of`, step: 'compartments' });
+  if (u.a === name) out.push({ where: `${un} › From (signature)`, step: 'uncoupling' });
+  if (u.b === name) out.push({ where: `${un} › To (signature)`, step: 'uncoupling' });
+  if (lm.a === name) out.push({ where: 'Figures › Figure 4a–f: first signature', step: null });
+  if (lm.b === name) out.push({ where: 'Figures › Figure 4a–f: second signature', step: null });
   return out;
+}
+
+/** What deleting `name` empties or drops in the lists that deleteSignature edits: sentences for the delete dialog. */
+export function deletionEffects(cfg, name) {
+  const notes = [];
+  const only = (list) => isList(list) && list.length > 0 && list.every((x) => x === name);
+  const fig = cfg.figures || {};
+  if (only(fig.composition_signatures)) {
+    notes.push('It is the only signature of the composition bars: Figure 3b is not drawn until others are chosen (Parameters › Figures).');
+  }
+  for (const p of isList(fig.positivity_panels) ? fig.positivity_panels : []) {
+    if (p && only(p.signatures)) notes.push(`It is the only signature of the positivity panel ${p.name}: the panel is not drawn until others are chosen (Parameters › Figures).`);
+  }
+  const pairs = (cfg.proximity && isList(cfg.proximity.pairs) ? cfg.proximity.pairs : []).filter((p) => p && (p.from === name || p.to === name));
+  if (pairs.length) notes.push(`Proximity pair${pairs.length === 1 ? '' : 's'} removed: ${pairs.map((p) => `${p.from} → ${p.to}`).join(', ')}.`);
+  if (only(cfg.roi && cfg.roi.exclude)) {
+    notes.push('It is the only signature that excludes bins from the region of interest: the whole section (or the drawn region) becomes the region of interest.');
+  }
+  if (cfg.steps && cfg.steps.sensitivity === true && only(cfg.sensitivity && cfg.sensitivity.signatures)) {
+    notes.push('The three-gene-set sensitivity has nothing left to test: switch it off (Parameters › Analysis steps).');
+  }
+  return notes;
 }
 
 /** Delete a signature and remove it from every list that names it; proximity pairs that use it are dropped. */
@@ -119,6 +147,7 @@ export function geneCoverage(report) {
   }
   ((genes.receptor_panel || {}).missing || []).forEach((g) => missing.add(g));
   ((genes.adipocyte_genes || {}).missing || []).forEach((g) => missing.add(g));
+  ((genes.ubiquitous || {}).missing || []).forEach((g) => missing.add(g));
   return { known: true, present, missing };
 }
 
@@ -402,8 +431,8 @@ export function signatureEditor({ cfg, defaults, report, ui, onChange }) {
           h('div', { class: 'help' }, 'Class drawn in Figure 3 for bins assigned to this signature.')),
         h('div', { class: 'field' }, h('label', { for: colorId }, 'Color'), h('div', { class: 'row' }, color, hexText))),
       h('div', { class: 'sig-flags' },
-        h('div', null, pSwitch, h('div', { class: 'help' }, 'Bins are called positive or negative for it (Figures 4g, 6a); listed in primary.')),
-        h('div', null, aSwitch, h('div', { class: 'help' }, 'It competes in the deterministic tissue assignment (Figure 3); listed in programs.'))),
+        h('div', null, pSwitch, h('div', { class: 'help' }, 'Bins are called positive or negative for it; listed in primary. The positivity figures show the signatures of their panels (Parameters › Figures).')),
+        h('div', null, aSwitch, h('div', { class: 'help' }, 'It competes in the deterministic tissue assignment (Figure 3); listed in programs. Figure 3b shows the signatures chosen under Parameters › Figures.'))),
       extended.el, core.el, coreNote, canonical.el,
       h('div', { class: 'field' }, h('label', { for: competes.el.querySelector('select').id }, 'Competes with'), competes.el,
         h('div', { class: 'help' }, 'A bin that scores higher on one of these signatures is not called positive for this one.')),
@@ -413,13 +442,22 @@ export function signatureEditor({ cfg, defaults, report, ui, onChange }) {
   async function removeSignature(name) {
     const s = sigs()[name] || {};
     const uses = signatureUsage(cfg, name);
+    const effects = deletionEffects(cfg, name);
+    const steps = cfg.steps && typeof cfg.steps === 'object' ? cfg.steps : {};
+    const stepOn = (u) => !!u.step && steps[u.step] === true;
+    const after = [];
+    if (uses.some(stepOn)) after.push('The analysis cannot start until another signature is chosen there, or the step is switched off (Parameters › Analysis steps).');
+    if (uses.some((u) => !u.step)) after.push('Figure 4a–f is not drawn until another signature is chosen there.');
     const ok = await confirmDialog({
       title: `Delete the signature “${s.label || name}”?`,
       message: h('div', null,
         h('p', null, 'It is also removed from the positivity calls, the tissue assignment, the competitor lists, the '
           + 'region-of-interest exclusions, the proximity pairs, the sensitivity sets and the figure lists.'),
-        uses.length ? h('p', null, h('strong', null, 'Still selected in: '), uses.join('; '),
-          '. Those steps are skipped until another signature is chosen (Parameters tab).') : null,
+        effects.length ? h('ul', null, effects.map((t) => h('li', null, t))) : null,
+        uses.length ? [
+          h('p', null, h('strong', null, 'Still selected in the Parameters tab:')),
+          h('ul', null, uses.map((u) => h('li', null, u.where, u.step && !stepOn(u) ? ' (step switched off)' : ''))),
+          after.length ? h('p', null, after.join(' ')) : null] : null,
         h('p', { class: 'muted' }, 'Discard (top of the page) restores the saved configuration.')),
       confirmLabel: 'Delete signature', danger: true,
     });

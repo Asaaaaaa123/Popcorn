@@ -341,6 +341,10 @@ _REPLACE = {"samples", "signatures", "classes", "primary", "programs", "receptor
 # ============================================================================
 # field types: int, float, bool, select (options), int_list, str_list, signature (one signature name),
 #              signature_list (several signature names)
+# A signature field may name the step that uses it ("uses_step": a steps key; switching that step off is the other way
+# out when the signature is gone) and "needs_call": true when the signature must have a positivity call (in primary).
+# The last section, "steps", is not a configuration section of its own: it carries the help of each step switch
+# (STEP_HELP) for the Analysis steps card; "study": "bone" marks the steps specific to the bone-lesion study.
 PARAM_SCHEMA = [
     {"key": "qc", "title": "Quality control", "description": "Bins kept for analysis (Methods, \"Quality control and "
      "filtering\"). The two sections differ about two-fold in capture; a single-cell gene threshold removes bins "
@@ -417,7 +421,8 @@ PARAM_SCHEMA = [
          "help": "A bin scoring above the exclusion percentile for any of these is outside the region. A signature with "
                  "a positivity call excludes its positive bins instead. For a sparse signature the percentile can be "
                  "0, and then as little as one UMI of one of its genes excludes a bin (nerve and smooth muscle on the "
-                 "manuscript data)."},
+                 "manuscript data). The manuscript leaves out the muscle and nerve around the bone; with none listed "
+                 "the whole section (or the drawn region) is the region of interest."},
         {"key": "exclude_percentile", "label": "Exclusion percentile", "type": "float", "min": 0, "max": 100,
          "step": 0.5, "help": "Percentile of each exclusion signature's score over all bins of all sections. For "
                               "sparse signatures it can be 0, so any bin with a score above 0 (as little as one UMI "
@@ -427,9 +432,19 @@ PARAM_SCHEMA = [
         {"key": "mask_frame", "label": "Image the regions were drawn on", "type": "select",
          "options": ["hires", "lowres", "fullres"]},
     ]},
-    {"key": "compartments", "title": "Osteoclast compartments (Figure 4h)", "fields": [
-        {"key": "signature", "label": "Signature split into compartments", "type": "signature"},
-        {"key": "split_by", "label": "Split by the score of", "type": "signature"},
+    {"key": "compartments", "title": "Osteoclast compartments (Figure 4h)", "description": "Specific to the "
+     "bone-lesion study: the bins positive for one signature (osteoclast) are split by the score of another "
+     "(chondrocyte) into a growth-plate compartment and, in tumor sections, a tumor-associated one, which are tested "
+     "against each other. Any signature with a positivity call can be split by any other; if no such split fits your "
+     "tissue, switch off the step \"Osteoclast compartments (Figure 4h)\" under Analysis steps.", "fields": [
+        {"key": "signature", "label": "Signature split into compartments", "type": "signature",
+         "uses_step": "compartments", "needs_call": True},
+        {"key": "split_by", "label": "Split by the score of", "type": "signature", "uses_step": "compartments"},
+        {"key": "tumor_conditions", "label": "Tumor conditions", "type": "str_list",
+         "help": "Sections whose condition (Data tab: control, tumor or other) is listed here are tumor sections: "
+                 "their positive bins outside the growth-plate compartment form the tumor-associated compartment, "
+                 "and with two sections the positivity table adds the tumor / control fold. Without a tumor section "
+                 "there is no test."},
         {"key": "percentile", "label": "Growth-plate percentile", "type": "float", "min": 0, "max": 100,
          "step": 0.5, "help": "Positive bins whose split score is above this percentile of all bins form the "
                               "growth-plate compartment. A zero-inflated score can make the percentile 0, and the rule "
@@ -440,9 +455,13 @@ PARAM_SCHEMA = [
          "bins; tumor: both compartments from tumor sections only (no between-section depth difference). On the "
          "manuscript data both settings give the same test: every growth-plate bin is in the tumor-bearing section."},
     ]},
-    {"key": "uncoupling", "title": "Distance to nearest partner (Figure 4i)", "fields": [
-        {"key": "a", "label": "From (signature)", "type": "signature"},
-        {"key": "b", "label": "To (signature)", "type": "signature"},
+    {"key": "uncoupling", "title": "Distance to nearest partner (Figure 4i)", "description": "Mean distance from "
+     "each bin positive for one signature to the nearest bin positive for another, against random placement in the "
+     "region of interest (osteoblast to osteoclast in the manuscript). Any two signatures with a positivity call can "
+     "be chosen; if no pair fits your tissue, switch off the step \"Distance to nearest partner (Figure 4i)\" under "
+     "Analysis steps.", "fields": [
+        {"key": "a", "label": "From (signature)", "type": "signature", "uses_step": "uncoupling", "needs_call": True},
+        {"key": "b", "label": "To (signature)", "type": "signature", "uses_step": "uncoupling", "needs_call": True},
         {"key": "calls", "label": "Positivity calls used", "type": "select",
          "options": ["pooled_dm", "pooled", "native"],
          "help": "pooled_dm: spatially pooled, depth-matched (manuscript)."},
@@ -471,22 +490,28 @@ PARAM_SCHEMA = [
         {"key": "n_boot", "label": "Bootstrap resamples", "type": "int", "min": 50, "max": 100000},
     ]},
     {"key": "sensitivity_analyses.lesion", "title": "Sensitivity analyses: A549 lesion flag", "description":
-     "The mouse probes for some conserved genes also capture the human A549 tumor RNA. A bin is flagged as lesion "
-     "when the UMIs of these genes in it and its nearest bins reach the minimum.", "fields": [
-        {"key": "genes", "label": "Cross-captured tumor genes", "type": "str_list"},
+     "Specific to the A549 xenograft: the mouse probes for some conserved genes also capture the human A549 tumor "
+     "RNA. A bin is flagged as lesion when the UMIs of these genes in it and its nearest bins reach the minimum; the "
+     "positivity sensitivity analysis then also reports a region of interest without the lesion.", "fields": [
+        {"key": "genes", "label": "Cross-captured tumor genes", "type": "str_list",
+         "help": "In other studies Krt7 and Krt18 are ordinary epithelial genes: empty the list, and no bin is "
+                 "flagged."},
         {"key": "pool_k", "label": "Nearest bins pooled", "type": "int", "min": 0, "max": 48},
         {"key": "min_pooled_umi", "label": "Minimum pooled UMIs", "type": "int", "min": 1},
     ]},
     {"key": "sensitivity_analyses.uncoupling", "title": "Sensitivity analyses: Figure 4i", "description":
      "The distance to the nearest partner under null models that keep the spatial pattern of the calls, for several "
-     "call sets and depth-matching draws.", "fields": [
+     "call sets and depth-matching draws. Runs only when the step \"Distance to nearest partner (Figure 4i)\" runs.",
+     "fields": [
         {"key": "n_draws", "label": "Depth-matching draws of the pooled calls", "type": "int", "min": 1, "max": 100},
         {"key": "n_perm", "label": "Random configurations per null model", "type": "int", "min": 1, "max": 100000},
         {"key": "null_models", "label": "Null models", "type": "str_list",
          "help": "csr_both (manuscript: both sets at random), fixed_b (osteoclasts kept, osteoblasts at random), "
                  "fixed_a, habitat_fixed_b (osteoblasts at random within bone-lineage bins), random_labels."},
         {"key": "call_sets", "label": "Call sets", "type": "str_list", "help": "pooled_dm, pooled, native."},
-        {"key": "habitat_classes", "label": "Tissue classes of the habitat null", "type": "str_list"},
+        {"key": "habitat_classes", "label": "Tissue classes of the habitat null", "type": "str_list",
+         "help": "habitat_fixed_b draws the 'from' bins among the bins assigned to a signature of these tissue "
+                 "classes (Signatures tab); bone lineage in the manuscript."},
     ]},
     {"key": "sensitivity_analyses.proximity", "title": "Sensitivity analyses: proximity tables", "fields": [
         {"key": "n_strata", "label": "Depth strata of the matched baseline", "type": "int", "min": 2, "max": 100},
@@ -501,7 +526,9 @@ PARAM_SCHEMA = [
         {"key": "depth_schemes", "label": "Depth-matching schemes", "type": "str_list",
          "help": "cap, quantile, quantile_roi (each section's ROI bins matched to the reference ROI)."},
     ]},
-    {"key": "sensitivity_analyses.compartments", "title": "Sensitivity analyses: Figure 4h", "fields": [
+    {"key": "sensitivity_analyses.compartments", "title": "Sensitivity analyses: Figure 4h", "description": "Figure "
+     "4h under other compartment definitions and tests. Runs only when the step \"Osteoclast compartments (Figure "
+     "4h)\" runs.", "fields": [
         {"key": "anatomical_distance_um", "label": "Distance to a chondrocyte-dense region (um)", "type": "float",
          "min": 0, "step": 16},
         {"key": "min_region_bins", "label": "Minimum bins of a chondrocyte-dense region", "type": "int", "min": 1},
@@ -526,7 +553,7 @@ STEP_LABELS = {
     "compartments": "Osteoclast compartments (Figure 4h)",
     "assignment": "Deterministic tissue assignment (Figure 3)",
     "stability": "Leiden seed stability (Methods)",
-    "uncoupling": "Osteoblast-to-osteoclast distance (Figure 4i)",
+    "uncoupling": "Distance to nearest partner (Figure 4i)",
     "proximity": "Proximity tables (within 50 um)",
     "moran": "Moran's I (Supplementary Figure S2, slow)",
     "sensitivity": "Three-gene-set sensitivity (Methods)",
@@ -535,6 +562,58 @@ STEP_LABELS = {
     "write_h5ad": "Write the joint AnnData object",
     "figures": "Draw figures",
 }
+
+# [APP] What each step is for (Parameters > Analysis steps), so that a lab studying other tissues or signatures can see
+# which steps are specific to the bone-lesion study (BONE_STUDY_STEPS) and point them at its own signatures or switch
+# them off.
+STEP_HELP = {
+    "qc_figure_bins": "Genes, UMIs and mitochondrial share of every bin of the QC bin size before filtering, for the "
+                      "histograms and retention curves of Supplementary Figure S1.",
+    "receptor_panel": "Detection of each gene of the host receptor panel (Signatures tab; by default the "
+                      "PTHrP/RANKL/OPG axis of the bone lesion) in the region of interest, raw and depth-matched "
+                      "(Figure 6b). Any gene list works: replace the genes, or switch the step off. Figure 6b draws "
+                      "the genes listed under Parameters > Figures (by default the RANKL axis): choose them among the "
+                      "new panel's genes, and switch off the shading of the first two (RANKL and OPG).",
+    "adipocyte_panel": "The same detection table for the adipocyte genes of the Signatures tab (marrow adiposity, "
+                       "Supplementary Figure S4). Replace the genes with any list of interest, or switch the step off.",
+    "depth_matched": "Positivity recomputed after downsampling every section to the depth of the shallowest one (right "
+                     "panels of the positivity figures).",
+    "leiden": "Unsupervised Leiden domains, their marker genes and the screen for domains headed by ubiquitous "
+              "transcripts (Supplementary Figure S5).",
+    "compartments": "Splits the bins positive for one signature (osteoclast) by the score of another (chondrocyte) "
+                    "into a growth-plate and, in tumor sections, a tumor-associated compartment and tests them against "
+                    "each other (Figure 4h). Choose the signatures and the tumor conditions under Osteoclast "
+                    "compartments, or switch the step off; its sensitivity analysis follows it.",
+    "assignment": "Each bin, pooled with its nearest bins, is assigned to the highest-scoring signature of the tissue "
+                  "assignment and drawn by tissue class (Figure 3). The pooled calls of the distance step and the "
+                  "sensitivity analyses need it.",
+    "stability": "Adjusted Rand index between Leiden runs that differ only by seed.",
+    "uncoupling": "Distance from each bin positive for one signature to the nearest bin positive for another, against "
+                  "random placement (Figure 4i; osteoblast to osteoclast in the manuscript). Choose any two signatures "
+                  "with a positivity call under Distance to nearest partner, or switch the step off; its sensitivity "
+                  "analysis follows it.",
+    "proximity": "One table per proximity pair (Proximity pairs): the share of the bins of one signature with a bin of "
+                 "another within the radius. The default pairs are the manuscript's; without pairs the step is "
+                 "skipped.",
+    "moran": "Moran's I of the highly variable genes of each section (Supplementary Figure S2). Slow.",
+    "sensitivity": "Osteoclast and osteoblast positivity under the three gene sets of the Methods (canonical markers, "
+                   "the original study's lists, Table 1). It tests only those signatures: leave it off for others.",
+    "sensitivity_analyses": "Second-review checks: positivity under other regions, calling rules and depth matching, "
+                            "proximity against other baselines and Leiden checks, plus Figures 4h and 4i under other "
+                            "definitions (only when those steps run) and the A549 lesion flag (empty its gene list "
+                            "for other studies).",
+    "project_fine_bins": "The Leiden domain and tissue assignment of each analysis bin, written for its bins of the QC "
+                         "bin size.",
+    "write_h5ad": "The joint AnnData object (all sections, counts, scores, calls, domains) for further work in Python.",
+    "figures": "Draws the figures (PNG and PDF) from the tables after the analysis; a figure without its inputs is "
+               "skipped with the reason.",
+}
+BONE_STUDY_STEPS = ("receptor_panel", "adipocyte_panel", "compartments", "uncoupling", "sensitivity")
+
+PARAM_SCHEMA.append({
+    "key": "steps", "title": "Analysis steps",
+    "fields": [dict({"key": k, "label": lab, "type": "bool", "help": STEP_HELP[k]},
+                    **({"study": "bone"} if k in BONE_STUDY_STEPS else {})) for k, lab in STEP_LABELS.items()]})
 
 # ============================================================================
 # HELPERS
@@ -594,6 +673,18 @@ def signature_label(cfg: dict, name: str) -> str:
     return cfg["signatures"].get(name, {}).get("label") or name.replace("_", " ")
 
 
+def compartment_names(cfg: dict) -> tuple[str, str]:
+    """[APP] Names of the two Figure 4h compartments in figure text and messages: the manuscript's "growth-plate" and
+    "tumor-associated" when osteoclast bins are split by the chondrocyte score, else names from the split_by label
+    ("high-<label>": above the percentile; "low-<label>": the other positive bins of the tumor sections), so that another
+    split is not called a growth plate. File and column names keep growth_plate / tumor_associated."""
+    comp = cfg.get("compartments") or {}
+    if (comp.get("signature"), comp.get("split_by")) == ("osteoclast", "chondrocyte"):
+        return "growth-plate", "tumor-associated"
+    split = signature_label(cfg, str(comp.get("split_by")))
+    return f"high-{split}", f"low-{split}"
+
+
 def _sample_base(cfg: dict, sample: dict) -> Path:
     p = Path(str(sample.get("path") or sample["id"])).expanduser()
     if not p.is_absolute():
@@ -637,6 +728,127 @@ def available_bin_sizes(cfg: dict, sample: dict | str) -> list[str]:
                 if m and (d / "filtered_feature_bc_matrix.h5").is_file():
                     found.add(m.group(1))
     return sorted(found)
+
+
+def _names(value) -> list:
+    """A list of signature names from a setting that may be a list, a single name or missing."""
+    return [value] if isinstance(value, str) else list(value) if isinstance(value, (list, tuple)) else []
+
+
+def _signature_settings(cfg: dict, sigs: dict, err: list, warn: list) -> None:
+    """[APP] Settings that name signatures one by one, checked against the signatures of the configuration, so that a
+    project whose bone signatures were deleted or replaced says what to change before it runs. A step that needs a
+    signature the user must choose (compartments, uncoupling) is an error while the step is on, naming both ways out;
+    a figure, table or pair that has nothing to work with is a warning (it is skipped). Nothing is reported for a step
+    that is switched off."""
+    steps = cfg.get("steps") if isinstance(cfg.get("steps"), dict) else {}
+
+    def on(key):
+        return steps.get(key, DEFAULT_CONFIG["steps"].get(key)) is True
+
+    primary = _names(cfg.get("primary"))
+    titles = {s["key"]: s["title"] for s in PARAM_SCHEMA}
+    for sec, k, field, needs_call in (("compartments", "signature", "Signature split into compartments", True),
+                                      ("compartments", "split_by", "Split by the score of", False),
+                                      ("uncoupling", "a", "From (signature)", True),
+                                      ("uncoupling", "b", "To (signature)", True)):
+        if not on(sec):
+            continue
+        n = (cfg.get(sec) or {}).get(k)
+        ways = (f"choose another signature in Parameters > {titles[sec]} > {field}, or switch off the step "
+                f"\"{STEP_LABELS[sec]}\" (Parameters > Analysis steps)")
+        if n not in sigs:
+            err.append(f"{sec}.{k} = {n!r} is not a signature of this project: {ways}")
+        elif needs_call and n not in primary:
+            err.append(f"{sec}.{k} = {n!r} has no positivity call: switch it on for {n} (Signatures tab), {ways}")
+    tumor = (cfg.get("compartments") or {}).get("tumor_conditions", [])
+    samples = [s for s in cfg.get("samples") or [] if isinstance(s, dict)]
+    if on("compartments") and isinstance(tumor, list) and samples \
+            and not any(s.get("condition") in tumor for s in samples):
+        warn.append(f"compartments.tumor_conditions ({', '.join(map(str, tumor)) or 'empty'}) lists the condition of "
+                    f"no section, so Figure 4h has no tumor-associated compartment and no test: list the condition of "
+                    f"the tumor sections in Parameters > {titles['compartments']} > Tumor conditions (the Data tab "
+                    f"sets each section's condition), or switch the step off")
+
+    if on("proximity"):
+        pairs = (cfg.get("proximity") or {}).get("pairs") or []
+        if not pairs:
+            warn.append(f"proximity.pairs is empty, so the step \"{STEP_LABELS['proximity']}\" writes nothing: add "
+                        f"pairs in Parameters > Proximity pairs, or switch the step off")
+        for p in pairs:
+            if not isinstance(p, dict):
+                continue
+            for k in ("from", "to"):
+                if p.get(k) not in sigs:
+                    warn.append(f"proximity pair {p.get('from')} -> {p.get('to')}: {p.get(k)!r} is not a signature; "
+                                f"the pair will be skipped (Parameters > Proximity pairs)")
+                elif p.get("mode") == "positivity" and p.get(k) not in primary:
+                    warn.append(f"proximity pair {p.get('from')} -> {p.get('to')} counts positivity calls, but "
+                                f"{p.get(k)} has none; the pair will be skipped (Parameters > Proximity pairs)")
+
+    fig = cfg.get("figures") if isinstance(cfg.get("figures"), dict) else {}
+    if on("figures"):
+        lm = fig.get("lineage_maps") if isinstance(fig.get("lineage_maps"), dict) else {}
+        for k, which in (("a", "first"), ("b", "second")):
+            n = lm.get(k)
+            if n not in sigs:
+                warn.append(f"figures.lineage_maps.{k} = {n!r} is not a signature of this project, so Figure 4a-f is "
+                            f"not drawn: choose its {which} signature in Parameters > Figures")
+            elif n not in primary:
+                warn.append(f"figures.lineage_maps.{k} = {n!r} has no positivity call, so Figure 4a-f is not drawn: "
+                            f"switch it on for {n} (Signatures tab) or choose another signature in Parameters > "
+                            f"Figures")
+        comp = _names(fig.get("composition_signatures"))
+        unknown = [n for n in comp if n not in sigs]
+        if on("assignment") and len(unknown) == len(comp):
+            warn.append("figures.composition_signatures lists no signature of this project, so Figure 3b is not "
+                        "drawn: choose the signatures of the composition bars in Parameters > Figures")
+        elif on("assignment") and unknown:
+            warn.append(f"figures.composition_signatures: {', '.join(map(repr, unknown))} not a signature of this "
+                        f"project; left out of Figure 3b")
+        for p in fig.get("positivity_panels") or []:
+            if not isinstance(p, dict):
+                continue                               # bone_figures reports malformed panels
+            names = _names(p.get("signatures"))
+            if not [n for n in names if n in sigs and n in primary]:
+                warn.append(f"positivity panel {p.get('name')!r} lists no signature with a positivity call, so it is "
+                            f"not drawn: choose its signatures, or remove it, in Parameters > Figures > Positivity "
+                            f"panels")
+        shown = [g for g in _names(fig.get("receptor_genes")) if isinstance(g, str)]
+        panel = cfg.get("receptor_panel") if isinstance(cfg.get("receptor_panel"), dict) else {}
+        if on("receptor_panel") and panel and not any(g in panel for g in shown):
+            warn.append(f"figures.receptor_genes ({', '.join(shown) or 'empty'}) names no gene of the host receptor "
+                        f"panel, so Figure 6b is not drawn: choose its genes in Parameters > Figures > Receptor genes "
+                        f"shown in Figure 6b (the panel itself is in the Signatures tab)")
+
+    sa = cfg.get("sensitivity_analyses") if isinstance(cfg.get("sensitivity_analyses"), dict) else {}
+    sa_unc = {**DEFAULT_CONFIG["sensitivity_analyses"]["uncoupling"],
+              **(sa.get("uncoupling") if isinstance(sa.get("uncoupling"), dict) else {})}
+    if on("sensitivity_analyses") and on("uncoupling") and "habitat_fixed_b" in _names(sa_unc.get("null_models")):
+        habitat = _names(sa_unc.get("habitat_classes"))
+        if not any((sigs.get(n) or {}).get("class") in habitat for n in _names(cfg.get("programs")) if n in sigs):
+            warn.append(f"sensitivity_analyses.uncoupling.habitat_classes ({', '.join(map(str, habitat)) or 'empty'}): "
+                        f"no signature of the tissue assignment has one of these classes, so the habitat_fixed_b null "
+                        f"of the Figure 4i sensitivity analysis is not estimable: choose classes in Parameters > "
+                        f"Sensitivity analyses: Figure 4i")
+    lesion = _names({**DEFAULT_CONFIG["sensitivity_analyses"]["lesion"],
+                     **(sa.get("lesion") if isinstance(sa.get("lesion"), dict) else {})}.get("genes"))
+    if on("sensitivity_analyses") and lesion and not any(n in sigs for n in ("osteoclast", "osteoblast")):
+        warn.append(f"sensitivity_analyses.lesion.genes ({', '.join(map(str, lesion))}) flags the A549 xenograft of "
+                    f"the manuscript (human tumor RNA captured by mouse probes); in a project without the osteoclast "
+                    f"and osteoblast signatures, bins that express these genes would be reported as A549 lesion in "
+                    f"the sensitivity analyses: empty the list in Parameters > Sensitivity analyses: A549 lesion flag "
+                    f"unless the tissue holds an A549 lesion")
+    if on("sensitivity"):
+        tested = _names((cfg.get("sensitivity") or {}).get("signatures"))
+        unknown = [n for n in tested if n not in sigs]
+        if len(unknown) == len(tested):
+            warn.append(f"the step \"{STEP_LABELS['sensitivity']}\" tests the manuscript's osteoclast and osteoblast "
+                        f"gene sets, and sensitivity.signatures names no signature of this project, so it is skipped: "
+                        f"switch it off (Parameters > Analysis steps)")
+        elif unknown:
+            warn.append(f"sensitivity.signatures: {', '.join(map(repr, unknown))} not a signature of this project; "
+                        f"left out of the three-gene-set sensitivity")
 
 
 def validate_config(cfg: dict) -> tuple[list[str], list[str]]:
@@ -801,20 +1013,10 @@ def validate_config(cfg: dict) -> tuple[list[str], list[str]]:
         elif n in (cfg.get("primary") or []):
             warn.append(f"roi.exclude: {n} has a positivity call, so its positive bins are excluded and "
                         f"roi.exclude_percentile does not apply to it")
-    for sec, keys in (("compartments", ("signature", "split_by")), ("uncoupling", ("a", "b"))):
-        for k in keys:
-            n = cfg.get(sec, {}).get(k)
-            if n not in sigs:
-                warn.append(f"{sec}.{k} = {n!r} is not a signature; that step will be skipped")
-            elif n not in cfg.get("primary", []) and not (sec == "compartments" and k == "split_by"):
-                warn.append(f"{sec}.{k} = {n!r} has no positivity call (not in primary); that step will be skipped")
+    _signature_settings(cfg, sigs, err, warn)
     for p in cfg.get("proximity", {}).get("pairs", []):
         if p.get("mode") not in ("assignment", "positivity"):
             err.append(f"proximity pair {p}: mode must be assignment or positivity")
-        for k in ("from", "to"):
-            if p.get(k) not in sigs:
-                warn.append(f"proximity pair {p.get('from')} -> {p.get('to')}: {p.get(k)!r} is not a signature; "
-                            f"the pair will be skipped")
     for c in cfg.get("classes", []):
         if not c.get("name"):
             err.append("every tissue class needs a name")

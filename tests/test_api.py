@@ -367,7 +367,7 @@ def test_validate(client, tiny_demo):
     cfg["reference_sample"] = "TUM-1"
     genes = client.post(f"/api/projects/{p['id']}/validate", json={"config": cfg}).json()["genes"]
     assert genes == {"n_features": None, "signatures": {}, "receptor_panel": {"missing": []},
-                     "adipocyte_genes": {"missing": []}}
+                     "adipocyte_genes": {"missing": []}, "ubiquitous": {"missing": []}, "lesion_genes": {"missing": []}}
 
 
 def test_sample_images(client, tiny_demo, tmp_path, monkeypatch):

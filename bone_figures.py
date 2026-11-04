@@ -70,6 +70,12 @@ from bone_sensitivity import (clustering_figures, compartments_figures, positivi
 _SENSITIVITY_FIGURES = [("positivity", positivity_figures), ("proximity", proximity_figures),
                         ("uncoupling", uncoupling_figures), ("compartments", compartments_figures),
                         ("clustering", clustering_figures)]
+# [APP] the analysis step each sensitivity module re-examines (bone_analysis._sensitivity_analyses runs it only with
+# that step), and the modules whose figure is empty without rows in one of its tables (the index in its INPUTS: the
+# Figure 4h variants are drawn for the genes of the top-genes table, which is empty when Figure 4h was not estimable)
+_SENSITIVITY_STEP = {"proximity": "proximity", "uncoupling": "uncoupling", "compartments": "compartments",
+                     "clustering": "leiden"}
+_SENSITIVITY_NEED_ROWS = {"positivity": 0, "proximity": 0, "uncoupling": 0, "compartments": 1}
 
 # [RUN] house style of every panel (8 pt type, embedded TrueType fonts in PDF)
 HOUSE_STYLE = {"pdf.fonttype": 42, "ps.fonttype": 42, "font.size": 8, "axes.linewidth": 0.6, "figure.dpi": 150,
@@ -174,6 +180,23 @@ def _signature_names(cfg):
         names.setdefault(label, n)
         names.setdefault(label.replace(" ", "_"), n)
     return names
+
+
+def _unscored(t, cfg):
+    """[APP] Signatures of a native-depth positivity table that could not be scored: fewer than two of their genes are
+    in the data, so bone_analysis.score_all left their score NaN and mean_score is NaN in every section with bins.
+    Their 0% positive is not a measurement."""
+    if "mean_score" not in t.columns or "signature" not in t.columns:
+        return set()
+    names = t["signature"].astype(str).map(_signature_names(cfg))
+    n, score = _col(t, "n_bins"), _col(t, "mean_score")
+    with_bins = ~(n <= 0)                              # NaN counts as having bins
+    out = set()
+    for sig in names.dropna().unique():
+        rows = (names == sig).to_numpy() & with_bins
+        if rows.any() and not np.isfinite(score[rows]).any():
+            out.add(sig)
+    return out
 
 
 def _bin_tag(bin_size):
@@ -653,12 +676,12 @@ def figure3b(comp_dm, cfg, out, summary=None):
     signatures; ambiguous, skeletal muscle, nerve, smooth muscle and endothelium excluded (counts written alongside).
     [FIX] legend entries were attached while drawing the first sample only, and only for signatures present in it, so
     a signature absent from the control had no legend entry; a section without retained bins divided by zero.
-    [APP] samples, retained signatures (cfg['figures']['composition_signatures']) and colors from the
-    configuration."""
+    [APP] samples, retained signatures (cfg['figures']['composition_signatures'], those that are signatures of the
+    configuration) and colors from the configuration."""
     out = Path(out)
-    keep = list(dict.fromkeys(cfg["figures"]["composition_signatures"]))
+    keep = [p for p in dict.fromkeys(cfg["figures"]["composition_signatures"]) if p in cfg["signatures"]]
     if not keep:
-        raise ValueError("figures.composition_signatures is empty")
+        raise ValueError("figures.composition_signatures lists no signature of this configuration")
     names = _signature_names(cfg)
     prog = comp_dm["program"].astype(str).map(names)
     smp = _samples(cfg)
@@ -824,11 +847,14 @@ def positivity_panel(t1, t2, cfg, out, name, sigs, summary=None):
     [FIX] The caption says what the intervals are: Wilson intervals are within-section binomial intervals that treat
     bins as independent (positive bins cluster in space, so they understate the uncertainty), there is one section per
     condition, and the depth-matched whiskers are the SD over the downsampling replicates only (the depth-matched
-    table's ci_lo/ci_hi columns hold the binomial interval)."""
+    table's ci_lo/ci_hi columns hold the binomial interval).
+    [APP] A signature that could not be scored (_unscored: none of its genes, or one only, is in the data) is left out
+    and named in the caption; it used to be drawn as 0% with a Wilson interval, like a measured rate."""
     in_table = set(t1["signature"].astype(str).map(_signature_names(cfg)).dropna())
-    present = [s for s in dict.fromkeys(sigs) if s in in_table]
+    unscored = _unscored(t1, cfg)
+    present = [s for s in dict.fromkeys(sigs) if s in in_table and s not in unscored]
     if not present:
-        raise ValueError(f"none of {', '.join(sigs)} is in the native-depth positivity table")
+        raise ValueError(f"none of {', '.join(sigs)} is in the native-depth positivity table with a score")
     smp = _samples(cfg)
     w = .76 / len(smp)
     fig = Figure(figsize=(6.5, 3.2) if t2 is not None else (3.6, 3.2))
@@ -907,9 +933,13 @@ def positivity_panel(t1, t2, cfg, out, name, sigs, summary=None):
     caption += ("Logarithmic axes; values below 0.001% (including zero) sit at the axis floor without a bar. "
                 f"Region of interest: {_sizes_text(cfg, n_roi)}. {_replication_text(cfg)}")
     caption += _fold_text(cfg, pct_native, present, lambda p: lbl(cfg, p), "Native-depth fold")
-    missing = [lbl(cfg, p) for p in sigs if p not in present]
+    missing = [lbl(cfg, p) for p in sigs if p not in present and p not in unscored]
     if missing:
         caption += f" Not in the positivity table (no positivity call): {_join(missing)}."
+    not_scored = [lbl(cfg, p) for p in dict.fromkeys(sigs) if p in unscored]
+    if not_scored:
+        caption += (f" Not drawn, because fewer than two of its genes are in the data, so it cannot be scored: "
+                    f"{_join(not_scored)}.")
     return [_entry(name, _title_from_name(name), caption)]
 
 
@@ -920,8 +950,11 @@ def positivity_panel(t1, t2, cfg, out, name, sigs, summary=None):
 def _compartment_text(summary, cfg, S, P):
     """[FIX] Figure 4h caption sentences from Figure4h_compartment_summary.csv: the effective growth-plate rule, the
     bins tested per compartment and section, those outside the region of interest, and the depth difference.
-    Returns (rule, details, number of sections with tested bins); ("", "", None) without a usable table."""
+    Returns (rule, details, number of sections with tested bins); ("", "", None) without a usable table.
+    [APP] Compartment names from pipeline_config.compartment_names (the manuscript's for its osteoclast / chondrocyte
+    split)."""
     comp = cfg["compartments"]
+    GP, TA = pc.compartment_names(cfg)
     if summary is None or "sample" not in summary.columns:
         return "", "", None
     rows = {str(r["sample"]): r for r in summary.to_dict("records")}
@@ -933,7 +966,7 @@ def _compartment_text(summary, cfg, S, P):
     if np.isfinite(thr):
         share = f" ({above:.1f}% of all bins)" if np.isfinite(above) else ""
         rule = (f" Effective rule: the {comp['percentile']:g}th percentile of the {P} score is 0 on these data, so a "
-                f"growth-plate bin is one with a {P} score above 0, which requires at least one UMI of a {P} gene"
+                f"{GP} bin is one with a {P} score above 0, which requires at least one UMI of a {P} gene"
                 f"{share}." if thr == 0 else
                 f" Effective rule: a {P} score above {thr:.3g}{share}.")
     tumor_cond = set(comp.get("tumor_conditions") or ["tumor"])
@@ -945,21 +978,21 @@ def _compartment_text(summary, cfg, S, P):
     def total(col):
         return sum(num[s["id"]].get(col, 0.0) for s in tested if np.isfinite(num[s["id"]].get(col, np.nan)))
     n_gp, n_ta = total("n_growth_plate"), total("n_tumor_associated")
-    per = "; ".join(f"{s['label']} {_count(num[s['id']].get('n_growth_plate', np.nan))} growth-plate, "
-                    f"{_count(num[s['id']].get('n_tumor_associated', np.nan))} tumor-associated" for s in tested)
-    text = f" Bins tested: {_count(n_gp)} growth-plate against {_count(n_ta)} tumor-associated ({per})."
+    per = "; ".join(f"{s['label']} {_count(num[s['id']].get('n_growth_plate', np.nan))} {GP}, "
+                    f"{_count(num[s['id']].get('n_tumor_associated', np.nan))} {TA}" for s in tested)
+    text = f" Bins tested: {_count(n_gp)} {GP} against {_count(n_ta)} {TA} ({per})."
     skipped = sum(v.get("n_non_growth_plate_control", 0.0) for k, v in num.items() if k != "all"
                   and np.isfinite(v.get("n_non_growth_plate_control", np.nan)))
     untested_gp = sum(num[s["id"]].get("n_growth_plate", 0.0) for s in _samples(cfg)
                       if s["id"] in num and s not in tested)
     if skipped or untested_gp:
-        text += (f" Not tested: {_count(skipped)} non-growth-plate {S}-positive bins of sections without a tumor "
+        text += (f" Not tested: {_count(skipped)} non-{GP} {S}-positive bins of sections without a tumor "
                  f"condition")
-        text += (f" and {_count(untested_gp)} growth-plate bins of the sections left out of the test."
+        text += (f" and {_count(untested_gp)} {GP} bins of the sections left out of the test."
                  if untested_gp else ".")
     out_gp, out_ta = total("n_growth_plate_outside_roi"), total("n_tumor_associated_outside_roi")
     text += (f" The compartments are not restricted to the region of interest: {_count(out_gp)} of {_count(n_gp)} "
-             f"growth-plate and {_count(out_ta)} of {_count(n_ta)} tumor-associated bins lie outside it.")
+             f"{GP} and {_count(out_ta)} of {_count(n_ta)} {TA} bins lie outside it.")
     if len(tested) == 1:
         med = num[tested[0]["id"]]
     elif not untested_gp:
@@ -969,7 +1002,7 @@ def _compartment_text(summary, cfg, S, P):
     m_gp, m_ta = med.get("median_umi_growth_plate", np.nan), med.get("median_umi_tumor_associated", np.nan)
     if np.isfinite(m_gp) and np.isfinite(m_ta):
         ratio = f" (ratio {m_gp / m_ta:.2f})" if m_ta > 0 else ""
-        text += (f" Median UMI per bin: growth-plate {m_gp:g}, tumor-associated {m_ta:g}{ratio}; the compartments "
+        text += (f" Median UMI per bin: {GP} {m_gp:g}, {TA} {m_ta:g}{ratio}; the compartments "
                  f"differ in depth as well as in composition.")
     n_sections = sum(1 for s in tested if num[s["id"]].get("n_growth_plate", 0) + num[s["id"]].get(
         "n_tumor_associated", 0) > 0)
@@ -996,7 +1029,10 @@ def figure4h(t4, cfg, out, top_n=DE_TOP_N, summary=None):
     depth difference between the compartments (summary: Figure4h_compartment_summary.csv, optional), and says that the
     P values are bin-level and descriptive. Genes of the split_by signature, which define the growth-plate compartment
     and are higher there by construction, are marked with a dagger. It said 'growth-plate bins from every section';
-    on the SR007144 data every growth-plate bin is in the tumor-bearing section."""
+    on the SR007144 data every growth-plate bin is in the tumor-bearing section.
+    [APP] Compartment names from pipeline_config.compartment_names: another split than osteoclast by chondrocyte is
+    drawn as high-<split_by> (left) / low-<split_by> (right), not as growth plate and tumor."""
+    GP, TA = pc.compartment_names(cfg)
     p_col = next((c for c in ("pvals_adj", "pvals") if c in t4.columns), None)
     t = t4.assign(scores=_col(t4, "scores"), _p=_col(t4, p_col) if p_col else np.nan)
     t = t[np.isfinite(t["scores"])]
@@ -1025,24 +1061,24 @@ def figure4h(t4, cfg, out, top_n=DE_TOP_N, summary=None):
     ax.set_yticklabels([f"{n}†" if n in selection else n for n in names], fontsize=7.5, style="italic")
     ax.axvline(0, color="k", lw=.6)
     ax.set_xlim(lo - (.15 if lo < 0 else .03) * span, hi + (.15 if hi > 0 else .03) * span)
-    ax.set_xlabel("Wilcoxon score: growth-plate compartment (left) / tumor-associated (right)", fontsize=7.5)
+    ax.set_xlabel(f"Wilcoxon score: {GP} compartment (left) / {TA} (right)", fontsize=7.5)
     save(fig, out, FIG4H, dpi=_dpi(cfg, "dpi", 200))
     S, P, comp = lbl(cfg, sig), lbl(cfg, split), cfg["compartments"]
     tumor = _join(comp.get("tumor_conditions") or ["tumor"])
     where = (f"both compartments are taken from sections whose condition is {tumor} only"
-             if comp.get("de_sections") == "tumor" else "growth-plate bins of any section are tested")
+             if comp.get("de_sections") == "tumor" else f"{GP} bins of any section are tested")
     rule, details, n_sections = _compartment_text(summary, cfg, S, P)
     caption = (f"Genes higher in each {S} compartment: Wilcoxon rank-sum test between the two compartments on the "
-               f"log-normalized expression of {S}-positive bins. Growth-plate compartment (left): {S}-positive bins "
-               f"whose {P} score is above the {comp['percentile']:g}th percentile of all bins; tumor-associated (right): "
-               f"the other {S}-positive bins of sections whose condition is {tumor} (non-growth-plate bins of other "
+               f"log-normalized expression of {S}-positive bins. {GP[:1].upper() + GP[1:]} compartment (left): "
+               f"{S}-positive bins whose {P} score is above the {comp['percentile']:g}th percentile of all bins; {TA} "
+               f"(right): the other {S}-positive bins of sections whose condition is {tumor} (non-{GP} bins of other "
                f"sections are not tested); {where}.{rule}{details} Top {top_n} genes per compartment by score "
-               f"(shown: {len(gp)} growth-plate, {len(ta)} tumor-associated); ")
+               f"(shown: {len(gp)} {GP}, {len(ta)} {TA}); ")
     caption += {"pvals_adj": "Benjamini-Hochberg adjusted P next to each bar; gray bars: adjusted P ≥ 0.05.",
                 "pvals": "unadjusted P next to each bar (the table has no adjusted P); gray bars: P ≥ 0.05.",
                 None: "the table has no P values (gray bars, 'n/a')."}[p_col]
     if marked:
-        caption += (f" †: genes of the {P} signature ({_join(marked)}), which define the growth-plate compartment "
+        caption += (f" †: genes of the {P} signature ({_join(marked)}), which define the {GP} compartment "
                     f"and are higher there by construction.")
     origin = ("all tested bins come from one section (no biological replication)" if n_sections == 1 else
               f"the tested bins come from {n_sections} sections, and bins are not biological replicates" if n_sections
@@ -1580,6 +1616,9 @@ def _prep_3a(ctx):
 
 def _prep_3b(ctx):
     comp = ctx.load(COMPOSITION_CSV, ["sample", "program", "n_bins"], step="assignment")
+    if not any(p in ctx.cfg["signatures"] for p in ctx.cfg["figures"]["composition_signatures"]):
+        raise _Skip("figures.composition_signatures lists no signature of this project: choose the signatures of the "
+                    "composition bars in Parameters > Figures")
     return [([(FIG3B, "Figure 3b — tissue composition after depth matching")],
              lambda: figure3b(comp, ctx.cfg, ctx.out, ctx.summary))]
 
@@ -1587,9 +1626,14 @@ def _prep_3b(ctx):
 def _prep_4af(ctx):
     cfg = ctx.cfg
     lm = cfg["figures"]["lineage_maps"]
-    for sig in (lm["a"], lm["b"]):
+    for k in ("a", "b"):
+        sig = lm[k]
+        if sig not in cfg["signatures"]:
+            raise _Skip(f"figures.lineage_maps.{k} = {sig!r} is not a signature of this project: choose the two "
+                        f"signatures in Parameters > Figures")
         if sig not in cfg["primary"]:
-            raise _Skip(f"{lbl(cfg, sig)} has no positivity call (not a primary signature)")
+            raise _Skip(f"{lbl(cfg, sig)} has no positivity call (not a primary signature): switch it on in the "
+                        f"Signatures tab, or choose another signature in Parameters > Figures")
     cols = ["sample_id", "x_um", "y_um", f"positive_{_slug(cfg, lm['a'])}", f"positive_{_slug(cfg, lm['b'])}"]
     ctx.per_bin(cols, peek=True)
     return [([(FIG4AF, f"Figures 4a-f — {lbl(cfg, lm['a'])}- and {lbl(cfg, lm['b'])}-positive bins")],
@@ -1598,12 +1642,19 @@ def _prep_4af(ctx):
 
 def _prep_positivity(ctx, name, sigs):
     cfg = ctx.cfg
+    if not any(s in cfg["signatures"] for s in sigs):
+        raise _Skip(f"positivity panel {name} lists no signature of this project: choose its signatures in "
+                    f"Parameters > Figures > Positivity panels")
     native = ctx.load(NATIVE_CSV, ["signature", "sample"])
     if "pct_positive" not in native.columns and not {"n_positive", "n_bins"} <= set(native.columns):
         raise _Skip(f"{NATIVE_CSV} has neither pct_positive nor n_positive and n_bins")
     names = set(native["signature"].astype(str).map(_signature_names(cfg)).dropna())
     if not any(s in names for s in sigs):
         raise _Skip(f"no positivity calls for {_join(lbl(cfg, s) for s in sigs) or 'any signature'} in {NATIVE_CSV}")
+    unscored = _unscored(native, cfg)
+    if not any(s in names and s not in unscored for s in sigs):
+        raise _Skip(f"no signature of positivity panel {name} can be scored: fewer than two genes of "
+                    f"{_join(lbl(cfg, s) for s in sigs if s in unscored)} are in the data (Signatures tab)")
     dm = ctx.optional(DEPTH_MATCHED_CSV, ["signature", "sample", "pct_positive_mean"])
     return [([(name, _title_from_name(name))],
              lambda: positivity_panel(native, dm, cfg, ctx.out, name, sigs, ctx.summary))]
@@ -1653,6 +1704,11 @@ def _prep_detection(ctx, csv, step, genes, name, title, intro, shade, comma, pan
 
 def _prep_6b(ctx):
     cfg = ctx.cfg
+    shown = list(cfg["figures"]["receptor_genes"])
+    if cfg["steps"].get("receptor_panel", True) and not any(g in cfg["receptor_panel"] for g in shown):
+        # [APP] a panel of other genes (validate_config warns): the setting to change, not only the table
+        raise _Skip(f"figures.receptor_genes ({_join(shown) or 'empty'}) names no gene of the host receptor panel: "
+                    f"choose the genes of Figure 6b in Parameters > Figures > Receptor genes shown in Figure 6b")
     return _prep_detection(ctx, RECEPTOR_CSV, "receptor_panel", list(cfg["figures"]["receptor_genes"]), FIG6B,
                            "Figure 6b — host receptor panel", "Host receptor panel.",
                            bool(cfg["figures"].get("receptor_shade_first_two")), False, cfg["receptor_panel"])
@@ -1701,11 +1757,28 @@ def _prep_s5(ctx):
              lambda: figureS5(M, ctx.cfg, ctx.out, unresolved))]
 
 
-def _prep_sensitivity(ctx, module):
+def _prep_sensitivity(ctx, module, key=None):
     """[APP] A figure of the second review's sensitivity analyses (bone_sensitivity/<name>_figures.py): drawn when its
-    main table (INPUTS[0]) exists, skipped otherwise; the module leaves out what its other tables would add."""
-    if not (ctx.results / module.INPUTS[0]).is_file():
-        raise _Skip(_absent(ctx.cfg, module.INPUTS[0], "sensitivity_analyses"))
+    main table (INPUTS[0]) exists, skipped otherwise; the module leaves out what its other tables would add. A module
+    that re-examines a step (_SENSITIVITY_STEP) runs only with that step, which the reason names when it is off; the
+    figures whose drawing needs rows of a table (_SENSITIVITY_NEED_ROWS) are skipped when it has none."""
+    cfg, name = ctx.cfg, module.INPUTS[0]
+    if not (ctx.results / name).is_file():
+        step = _SENSITIVITY_STEP.get(key)
+        if cfg["steps"].get("sensitivity_analyses", True) and step and not cfg["steps"].get(step, True):
+            raise _Skip(_absent(cfg, name, step))
+        if key == "proximity" and not cfg["proximity"].get("pairs"):
+            raise _Skip("no proximity pairs (Parameters > Proximity pairs)")
+        raise _Skip(_absent(cfg, name, "sensitivity_analyses"))
+    rows = module.INPUTS[_SENSITIVITY_NEED_ROWS[key]] if key in _SENSITIVITY_NEED_ROWS else None
+    if rows and (ctx.results / rows).is_file():
+        try:
+            ctx.load(rows, nrows=1)                    # _Skip "<name> has no rows" (the figure would be empty)
+        except _Skip as exc:
+            if key != "compartments":
+                raise
+            raise _Skip(f"{exc}: the compartment test of Figure 4h was not estimable, so there is no gene to "
+                        f"draw") from None
     return [(list(module.FIGURES), lambda: module.draw(ctx.results, ctx.cfg, ctx.out))]
 
 
@@ -1768,7 +1841,8 @@ def _plan(cfg, manuscript_extras=False):
                        [(FIGS5, "Supplementary Figure S5 — Leiden domain heatmap")], _prep_s5))
     for key, mod in _SENSITIVITY_FIGURES:
         for name, title in mod.FIGURES:
-            steps.append(_Step(f"Draw {title}", [(name, title)], functools.partial(_prep_sensitivity, module=mod)))
+            steps.append(_Step(f"Draw {title}", [(name, title)],
+                               functools.partial(_prep_sensitivity, module=mod, key=key)))
     seen = set()
     for s in steps:                                    # labels are the progress keys: keep them unique
         if s.label in seen:

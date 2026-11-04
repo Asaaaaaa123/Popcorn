@@ -30,8 +30,12 @@ import re
 import secrets
 import stat
 import string
+import tempfile
 import threading
+import time
+import zipfile
 from pathlib import Path
+from typing import NamedTuple
 from urllib.parse import quote
 
 import h5py
@@ -43,6 +47,8 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 from scipy import sparse
+from scipy.spatial import cKDTree
+from starlette.background import BackgroundTask
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 import pipeline_config as pc
@@ -406,7 +412,7 @@ def gene_list(value) -> list[str]:
 def genes_report(cfg: dict, panels: list[tuple[str, ...]]) -> tuple[dict, list[str]]:
     """Gene part of POST /validate over the gene panels of the readable samples: (report, warnings)."""
     report = {"n_features": None, "signatures": {}, "receptor_panel": {"missing": []},
-              "adipocyte_genes": {"missing": []}}
+              "adipocyte_genes": {"missing": []}, "ubiquitous": {"missing": []}, "lesion_genes": {"missing": []}}
     if not panels:
         return report, []
     warnings = []
@@ -444,6 +450,23 @@ def genes_report(cfg: dict, panels: list[tuple[str, ...]]) -> tuple[dict, list[s
         miss = report[key]["missing"]
         if miss:
             warnings.append(f"{label}: {len(miss)} genes missing from the probe set ({', '.join(miss)})")
+    # the Leiden screen's ubiquitous transcripts (Signatures tab) and the A549 lesion genes of the sensitivity analyses
+    ubiquitous = gene_list(cfg.get("ubiquitous"))
+    report["ubiquitous"]["missing"] = miss = [g for g in ubiquitous if g not in present]
+    if ubiquitous and len(miss) == len(ubiquitous):
+        warnings.append(f"ubiquitous transcripts: none of the {len(ubiquitous)} genes is in the probe set, so the "
+                        f"Leiden screen marks no domain unresolved: list abundant housekeeping transcripts of your data "
+                        f"(Signatures tab, Ubiquitous transcripts)")
+    elif miss:
+        warnings.append(f"ubiquitous transcripts: {len(miss)} of {len(ubiquitous)} genes missing from the probe set "
+                        f"({', '.join(miss)})")
+    sa = cfg.get("sensitivity_analyses") if isinstance(cfg.get("sensitivity_analyses"), dict) else {}
+    lesion = gene_list((sa.get("lesion") if isinstance(sa.get("lesion"), dict) else {}).get("genes"))
+    report["lesion_genes"]["missing"] = miss = [g for g in lesion if g not in present]
+    steps = cfg.get("steps") if isinstance(cfg.get("steps"), dict) else {}
+    if steps.get("sensitivity_analyses") is True and lesion and len(miss) == len(lesion):
+        warnings.append(f"A549 lesion flag: none of its genes ({', '.join(lesion)}) is in the probe set, so the "
+                        f"sensitivity analyses flag no bin as lesion")
     return report, warnings
 
 
@@ -1015,9 +1038,10 @@ def read_counts(path: Path, max_bins: int | None = None) -> tuple[sparse.csr_mat
     return X, barcodes, names
 
 
-def read_positions(path: Path) -> pd.DataFrame:
-    """Every row of a tissue positions file (in tissue or not): barcode (normalised like the matrix barcodes) and the
-    full-resolution pixel coordinates x = pxl_col_in_fullres, y = pxl_row_in_fullres (NaN when not a number)."""
+def read_positions(path: Path, normalise: bool = True) -> pd.DataFrame:
+    """Every row of a tissue positions file (in tissue or not): barcode (normalised like the matrix barcodes, or as
+    written with normalise=False) and the full-resolution pixel coordinates x = pxl_col_in_fullres,
+    y = pxl_row_in_fullres (NaN when not a number)."""
     try:
         if path.suffix == ".parquet":
             df = pd.read_parquet(path)
@@ -1026,7 +1050,8 @@ def read_positions(path: Path) -> pd.DataFrame:
         else:
             df = pd.read_csv(path)
         bc = "barcode" if "barcode" in df.columns else df.columns[0]
-        return pd.DataFrame({"barcode": norm_barcodes(df[bc]).to_numpy(object),
+        barcodes = norm_barcodes(df[bc]) if normalise else df[bc].astype(str)
+        return pd.DataFrame({"barcode": barcodes.to_numpy(object),
                              "x": pd.to_numeric(df["pxl_col_in_fullres"], errors="coerce").to_numpy(float),
                              "y": pd.to_numeric(df["pxl_row_in_fullres"], errors="coerce").to_numpy(float)})
     except (OSError, KeyError, ValueError, IndexError, ImportError) as exc:
@@ -1121,17 +1146,23 @@ class RawSection:
         return np.rint(total).astype(np.int64), np.rint(detected).astype(np.int64)
 
     def rows_of(self, barcodes: list[str], sid: str) -> np.ndarray:
-        """Row of each barcode of a per-bin table (-1 when it has none). The analysis joins the sections with
-        anndata.concat(index_unique="-"), so a per-bin barcode is <normalised matrix barcode>-<sample id>; a barcode
-        without that suffix is looked up as it is, then normalised like the matrix barcodes."""
-        suffix = f"-{sid}"
-        rows = self.index.get_indexer([b[:-len(suffix)] if b.endswith(suffix) else b for b in barcodes])
-        for attempt in (lambda bs: bs, lambda bs: norm_barcodes(bs).tolist()):
-            missing = np.flatnonzero(rows < 0)
-            if not len(missing):
-                break
-            rows[missing] = self.index.get_indexer(attempt([barcodes[i] for i in missing.tolist()]))
-        return rows
+        """Row of each barcode of a per-bin table (-1 when it has none); see run_barcode_rows."""
+        return run_barcode_rows(self.index, barcodes, sid)
+
+
+def run_barcode_rows(index: pd.Index, barcodes: list[str], sid: str) -> np.ndarray:
+    """Position in `index` (a section's matrix barcodes, normalised and made unique) of each barcode of a per-bin
+    table, -1 when it has none. The analysis joins the sections with anndata.concat(index_unique="-"), so a per-bin
+    barcode is <normalised matrix barcode>-<sample id>; a barcode without that suffix is looked up as it is, then
+    normalised like the matrix barcodes."""
+    suffix = f"-{sid}"
+    rows = index.get_indexer([b[:-len(suffix)] if b.endswith(suffix) else b for b in barcodes])
+    for attempt in (lambda bs: bs, lambda bs: norm_barcodes(bs).tolist()):
+        missing = np.flatnonzero(rows < 0)
+        if not len(missing):
+            break
+        rows[missing] = index.get_indexer(attempt([barcodes[i] for i in missing.tolist()]))
+    return rows
 
 
 class RunGeneLink:
@@ -1244,16 +1275,27 @@ def qc_thresholds(cfg: dict) -> tuple[dict, list[str]]:
     return out, notes
 
 
+def qc_pct_mt(mt: np.ndarray, total: np.ndarray) -> np.ndarray:
+    """Mitochondrial share per bin in percent, float32 like scanpy's calculate_qc_metrics (NaN without counts)."""
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        return (mt.astype(np.float32) / total.astype(np.float32)) * np.float32(100)
+
+
+def passes_qc(n_genes: np.ndarray, total: np.ndarray, pct_mt: np.ndarray, qc: dict) -> np.ndarray:
+    """bone_analysis.qc_filter's decision per bin, to the last bin: genes > qc.min_genes, UMIs > qc.min_counts and
+    mitochondrial share < qc.max_pct_mt, in float32 (Python-float thresholds: compared in float32 as pandas does there,
+    and no overflow for a huge draft value)."""
+    with np.errstate(invalid="ignore", over="ignore"):
+        return ((n_genes > float(qc["min_genes"])) & (total.astype(np.float32) > float(qc["min_counts"]))
+                & (pct_mt < float(qc["max_pct_mt"])))
+
+
 def explore_payload(section: RawSection, sid: str, bin_size: str, mpp: float, qc: dict, image: dict | None,
                     notes: list[str]) -> bytes:
     """JSON of POST /explore/{sid}/bins: the bin payload of GET /runs/{rid}/bins (same shape) for the raw section."""
     total = section.total
-    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
-        # float32 like scanpy's calculate_qc_metrics, so that passes_qc is the analysis' decision to the last bin
-        # (Python-float thresholds: compared in float32 as pandas does there, and no overflow for a huge draft value)
-        pct_mt = (section.mt.astype(np.float32) / total.astype(np.float32)) * np.float32(100)
-        passes = ((section.n_genes > float(qc["min_genes"])) & (total.astype(np.float32) > float(qc["min_counts"]))
-                  & (pct_mt < float(qc["max_pct_mt"])))
+    pct_mt = qc_pct_mt(section.mt, total)
+    passes = passes_qc(section.n_genes, total, pct_mt, qc)
     n = section.n_bins
     finite_pct = pct_mt[np.isfinite(pct_mt)]
     n_pass = int(passes.sum())
@@ -1323,6 +1365,612 @@ def gene_query(query, limit) -> tuple[str, int]:
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= GENE_LIST_MAX:
         raise HTTPException(400, f"limit must be an integer from 1 to {GENE_LIST_MAX}")
     return query.strip(), limit
+
+
+# ============================================================================
+# LOUPE BROWSER EXPORT (GET /runs/{rid}/export/loupe)
+# ============================================================================
+# The calls of a run as category CSV files for 10x Genomics Loupe Browser, which imports one into the .cloupe file of
+# one section at one bin size. The first column, "barcode", lists every barcode of that section's
+# filtered_feature_bc_matrix.h5 (the bins of its .cloupe file) exactly as Space Ranger wrote it, -1 included; every
+# other column is a category (its header is the name Loupe shows) of text labels. No cell is empty: an analysed bin
+# without a value is "NA", a bin the run did not analyse "not analyzed". Comma-separated, LF line endings, UTF-8
+# without a byte-order mark, and no comma, quote, tab or line break inside a label (10x documents no quoting).
+LOUPE_BIN_UM = 8                    # Space Ranger writes the .cloupe file of a Visium HD section at 8 um
+LOUPE_BIN_SIZE = "008um"            # (outs/cloupe_008um.cloupe); other sizes only with --custom-bin-size
+LOUPE_NOT_ANALYZED = "not analyzed"
+LOUPE_MISSING = "NA"
+LOUPE_MAX_VALUES = 32_768           # distinct values of one category Loupe Browser supports (10x)
+LOUPE_CHUNK_ROWS = 50_000           # CSV rows formatted at a time
+LOUPE_QC_CHUNK = 1_000_000          # stored counts of the 8 um matrix read at a time for its quality control
+LOUPE_QC_HEADER = "8 um QC"         # the 8 um bin's own quality control (pass / fail) in the 8 um files
+LOUPE_HEADERS = {"tissue_class": "Tissue class", "assigned_signature": "Assigned signature",
+                 "leiden_domain": "Leiden domain", "in_region_of_interest": "Region of interest"}
+LOUPE_LEFT_OUT = {"sample_id": "the section (one file per section)", "section": "the section (one file per section)",
+                  "x_um": "a coordinate (Loupe Browser has the bin positions)",
+                  "y_um": "a coordinate (Loupe Browser has the bin positions)"}
+HD_BARCODE_RE = re.compile(r"^s_(\d{3})um_(\d{1,6})_(\d{1,6})(?:-\d+)?$")  # Visium HD bin: size, row, column
+GRID_KEY = 1_000_000                # key of a grid position: row * GRID_KEY + column
+PER_BIN_RE = re.compile(r"^per_bin_signature_calls_(\d+)um\.csv\.gz$")
+_LOUPE_UNSAFE = str.maketrans({",": ";", '"': "'", "\r": " ", "\n": " ", "\t": " "})
+
+
+def loupe_text(value) -> str:
+    """A label or category name as Loupe Browser can read it: commas, quotes, tabs and line breaks replaced, no
+    surrounding blanks."""
+    return str(value).translate(_LOUPE_UNSAFE).strip()
+
+
+def loupe_header(col: str) -> str:
+    """Category name of a per-bin column: tissue_class -> "Tissue class", positive_osteoblast -> "Positive
+    osteoblast"."""
+    text = LOUPE_HEADERS.get(col) or loupe_text(col.replace("_", " "))
+    return text[:1].upper() + text[1:]
+
+
+def yes_no_labels(col: str) -> tuple[str, str]:
+    """The labels of True and False in a yes/no column of the per-bin table."""
+    if col.startswith("positive_"):
+        return "positive", "negative"
+    if col.startswith("in_"):
+        return "inside", "outside"
+    return "yes", "no"
+
+
+class LoupeColumn(NamedTuple):
+    header: str                     # category name in Loupe Browser
+    source: str                     # column of the per-bin table
+    kind: str                       # "bool" | "text"
+    categories: list[str]           # its labels
+    codes: np.ndarray               # per row of the per-bin table: index into categories, -1 = no value
+
+
+def loupe_columns(df: pd.DataFrame) -> tuple[list[LoupeColumn], list[tuple[str, str]]]:
+    """The categories of a per-bin table, whatever its signatures and steps: tissue class, assigned signature, Leiden
+    domain and region of interest, then every other yes/no or text column in table order (one positivity call per
+    signature, ...), and the columns left out with the reason. Numbers are left out: each value would be a cluster."""
+    columns, left_out, used = [], [], {"barcode"}
+    for col in [c for c in LOUPE_HEADERS if c in df.columns] + [c for c in df.columns if c not in LOUPE_HEADERS]:
+        if col == "barcode":
+            continue
+        if col in LOUPE_LEFT_OUT:
+            left_out.append((col, LOUPE_LEFT_OUT[col]))
+            continue
+        s = df[col]
+        if not s.notna().any():
+            left_out.append((col, "no values in this run"))
+            continue
+        kind = "text" if col in BIN_CATEGORY_COLUMNS else column_kind(s)
+        if kind == "number":
+            left_out.append((col, "a number, not a category"))
+            continue
+        if kind == "bool":
+            yes, no = yes_no_labels(col)
+            labels = [(yes if v else no) if isinstance(v, (bool, np.bool_)) else None for v in s.tolist()]
+        else:
+            labels = []
+            for v in s.tolist():
+                text = category_label(v)
+                text = loupe_text(text) if text is not None else ""
+                if col == "leiden_domain" and text.isdigit():
+                    text = f"domain {text}"  # a word, like Loupe's own "Cluster 1": never read as a number
+                labels.append(text or None)
+        codes, uniques = pd.factorize(pd.Series(labels, dtype=object))
+        limit = LOUPE_MAX_VALUES - 2 if col in BIN_CATEGORY_COLUMNS else BIN_MAX_CATEGORIES
+        if not len(uniques):
+            left_out.append((col, "no values in this run"))
+            continue
+        if len(uniques) > limit:
+            left_out.append((col, f"{len(uniques):,} different values, too many for a category"))
+            continue
+        base = loupe_header(col) or "Column"
+        header, n = base, 2
+        while header.casefold() in used:
+            header, n = f"{base} {n}", n + 1
+        used.add(header.casefold())
+        columns.append(LoupeColumn(header, col, kind, [str(u) for u in uniques], np.asarray(codes, np.int32)))
+    return columns, left_out
+
+
+def loupe_texts(columns: list[LoupeColumn], rows: np.ndarray) -> tuple[list[str], np.ndarray]:
+    """The CSV text that follows the barcode on the row of a bin, for the per-bin table rows `rows`: (texts, the index
+    of each row's text). Rows with the same labels share one text (a section has a few thousand combinations, so a
+    file of 400,000 bins holds little besides its barcodes); the last text is that of a bin the run did not analyse."""
+    codes = np.zeros((len(rows), len(columns)), np.int32)
+    for j, col in enumerate(columns):
+        codes[:, j] = col.codes[rows]
+    combo, combos = pd.factorize(pd.Series([r.tobytes() for r in codes], dtype=object))
+    texts = []
+    for combination in combos:
+        ks = np.frombuffer(combination, np.int32).tolist()
+        texts.append("".join("," + (col.categories[k] if k >= 0 else LOUPE_MISSING) for col, k in zip(columns, ks)))
+    texts.append("".join("," + LOUPE_NOT_ANALYZED for _ in columns))
+    return texts, np.asarray(combo, np.int64)
+
+
+def write_loupe_csv(zf: zipfile.ZipFile, name: str, headers: list[str], barcodes: list[str], src: np.ndarray,
+                    texts: list[str], combo: np.ndarray, extra: tuple[str, list[str]] | None = None) -> None:
+    """A CSV entry of the zip file: the header, then a row per barcode with the labels of the section row src[i] of
+    the per-bin table (-1: not analysed; texts and combo from loupe_texts), LOUPE_CHUNK_ROWS rows at a time. extra:
+    (header, label per barcode) of a last column that describes the bin itself (the 8 um QC). LF line endings whatever
+    the platform, UTF-8 without a byte-order mark."""
+    order = np.full(len(src), len(texts) - 1, np.int64)
+    ok = src >= 0
+    order[ok] = combo[src[ok]]
+    order = order.tolist()
+    if extra:
+        shared = {v: f",{v}" for v in set(extra[1])}  # one text per label, not per row
+        tails = [shared[v] for v in extra[1]]
+    else:
+        tails = [""] * len(barcodes)
+    with zf.open(name, "w") as fh:
+        fh.write(("barcode" + "".join("," + h for h in headers) + (f",{extra[0]}" if extra else "") + "\n")
+                 .encode("utf-8"))
+        for start in range(0, len(barcodes), LOUPE_CHUNK_ROWS):
+            stop = start + LOUPE_CHUNK_ROWS
+            fh.write("".join(f"{b}{texts[t]}{x}\n" for b, t, x in
+                             zip(barcodes[start:stop], order[start:stop], tails[start:stop])).encode("utf-8"))
+
+
+def matrix_barcodes(path: Path) -> list[str]:
+    """The barcodes of a feature-barcode matrix as Space Ranger wrote them (the counts are not read)."""
+    try:
+        with h5py.File(path, "r") as f:
+            m = f["matrix"]
+            n = int(m["shape"][()][1])
+            if n > RAW_SECTION_MAX_BINS:
+                raise DataError(f"{path} holds {n:,} bins; the Loupe Browser export reads at most "
+                                f"{RAW_SECTION_MAX_BINS:,} bins per section")
+            barcodes = decode_all(m["barcodes"][()])
+    except (OSError, KeyError, ValueError, IndexError, TypeError) as exc:
+        raise DataError(f"{path} is not a readable feature-barcode matrix ({exc})") from exc
+    if len(barcodes) != n:
+        raise DataError(f"{path}: the barcodes do not match the matrix shape")
+    joined = "\0".join(barcodes)
+    if any(ch in joined for ch in ',"\r\n'):
+        raise DataError(f"{path}: a barcode holds a comma, a quote or a line break, which a category file for Loupe "
+                        f"Browser cannot carry")
+    return barcodes
+
+
+def hd_grid_keys(barcodes) -> tuple[np.ndarray, np.ndarray]:
+    """(bin size in um, grid key row * GRID_KEY + column) of Visium HD bin barcodes (s_008um_00269_00526, with or
+    without the -1 suffix); -1 for a barcode that is not one. The layout Space Ranger writes (five-digit row and
+    column) is read as bytes, a few hundred thousand barcodes in a fraction of a second; any other with the regex."""
+    values = [str(b) for b in barcodes]
+    size = np.full(len(values), -1, np.int64)
+    key = np.full(len(values), -1, np.int64)
+    rest = np.arange(len(values))
+    try:
+        b = np.array(values, dtype="S") if values else None
+    except UnicodeEncodeError:
+        b = None
+    if b is not None and b.dtype.itemsize >= 19:
+        m = b.view(np.uint8).reshape(len(values), b.dtype.itemsize)  # one byte per character, 0 after the end
+        digit = (m >= ord("0")) & (m <= ord("9"))
+        fixed = digit[:, [2, 3, 4, *range(8, 13), *range(14, 19)]].all(axis=1)
+        for pos, char in ((0, "s"), (1, "_"), (5, "u"), (6, "m"), (7, "_"), (13, "_")):
+            fixed &= m[:, pos] == ord(char)
+        if m.shape[1] > 19:  # after the column: nothing, or -<digits>
+            ends = m[:, 19] == 0
+            if m.shape[1] > 20:
+                ends |= (m[:, 19] == ord("-")) & digit[:, 20] & (digit[:, 21:] | (m[:, 21:] == 0)).all(axis=1)
+            fixed &= ends
+
+        def number(sel: np.ndarray, cols: range) -> np.ndarray:
+            return (m[sel][:, cols].astype(np.int64) - ord("0")) @ (10 ** np.arange(len(cols) - 1, -1, -1))
+
+        size[fixed] = number(fixed, range(2, 5))
+        key[fixed] = number(fixed, range(8, 13)) * GRID_KEY + number(fixed, range(14, 19))
+        rest = np.flatnonzero(~fixed)
+    for i in rest.tolist():
+        match = HD_BARCODE_RE.match(values[i])
+        if match:
+            size[i] = int(match[1])
+            key[i] = int(match[2]) * GRID_KEY + int(match[3])
+    return size, key
+
+
+def parent_keys(keys: np.ndarray, fine_um: int, coarse_um: int) -> np.ndarray:
+    """Grid key of the coarse bin that holds each fine bin, from the grid indices alone: the grids of all bin sizes
+    start at the same corner, so fine index i lies in coarse bin i * fine_um // coarse_um (8 into 16 um: i // 2, as
+    bone_analysis.map_domains_from_coarser projects labels). -1 stays -1."""
+    row, col = np.divmod(keys, GRID_KEY)
+    out = (row * fine_um // coarse_um) * GRID_KEY + col * fine_um // coarse_um
+    return np.where(keys >= 0, out, -1)
+
+
+def position_keys(path: Path) -> tuple[np.ndarray, np.ndarray]:
+    """(grid key of each row of a tissue positions file, in tissue or not, -1 when its barcode is not a Visium HD bin
+    barcode; the full-resolution centres x, y as an n x 2 array, NaN when not a number). The barcodes are dropped once
+    parsed: an 8 um positions file has about 700,000 rows."""
+    pos = read_positions(path, normalise=False)
+    _, keys = hd_grid_keys(pos["barcode"])
+    return keys, pos[["x", "y"]].to_numpy(float)
+
+
+def nearest_parent_keys(fine_positions: Path, coarse_positions: Path, fine_keys: np.ndarray) -> np.ndarray:
+    """Grid key of the coarse bin whose centre is nearest to the centre of each fine bin (fine_keys: the grid keys of
+    the fine matrix barcodes, -1 for none), i.e. the coarse square the fine centre lies in; every coarse bin of the
+    positions file counts, in tissue or not. -1 for a fine bin without a position. Bins are found in the positions
+    files by grid key, not by barcode text (a few hundred thousand barcodes would cost far more memory)."""
+    keys, xy = position_keys(coarse_positions)
+    ok = (keys >= 0) & np.isfinite(xy).all(axis=1)
+    out = np.full(len(fine_keys), -1, np.int64)
+    if not ok.any():
+        return out
+    tree, keys = cKDTree(xy[ok]), keys[ok]
+    del xy
+    pos_keys, pos_xy = position_keys(fine_positions)
+    rows = np.flatnonzero(pos_keys >= 0)
+    index = pd.Index(pos_keys[rows])
+    if not index.is_unique:
+        first = ~index.duplicated()
+        index, rows = index[first], rows[first]
+    at = np.where(fine_keys >= 0, index.get_indexer(fine_keys), -1)
+    fxy = np.full((len(fine_keys), 2), np.nan)
+    fxy[at >= 0] = pos_xy[rows[at[at >= 0]]]
+    have = np.isfinite(fxy).all(axis=1)
+    if have.any():
+        _, nearest = tree.query(fxy[have])
+        out[have] = keys[nearest]
+    return out
+
+
+def matrix_qc(path: Path, qc: dict) -> tuple[np.ndarray, np.ndarray]:
+    """(whether each barcode of a feature-barcode matrix passes the quality control `qc` (passes_qc), its UMIs), in
+    matrix order, from the Gene Expression counts as RawSection reads them: LOUPE_QC_CHUNK stored counts at a time,
+    since an 8 um section holds tens of millions."""
+    try:
+        with h5py.File(path, "r") as f:
+            m = f["matrix"]
+            n_features, n = (int(v) for v in m["shape"][()][:2])
+            indptr = m["indptr"][()].astype(np.int64)
+            features = m["features"]
+            names = decode_all(features["name"][()])
+            kinds = decode_all(features["feature_type"][()]) if "feature_type" in features else None
+            if len(indptr) != n + 1 or len(names) != n_features:
+                raise ValueError("the barcodes and features do not match the matrix shape")
+            gene = (np.array([k == GENE_EXPRESSION for k in kinds], dtype=bool) if kinds is not None
+                    else np.ones(n_features, dtype=bool))
+            mito = gene & np.array([str(g).lower().startswith(MT_PREFIX) for g in names], dtype=bool)
+            total, n_genes, mt = (np.zeros(n, np.int64) for _ in range(3))
+            start = 0
+            while start < n:
+                stop = int(np.searchsorted(indptr, indptr[start] + LOUPE_QC_CHUNK, side="right")) - 1
+                stop = min(max(stop, start + 1), n)
+                lo, hi = int(indptr[start]), int(indptr[stop])
+                data, cols = m["data"][lo:hi], m["indices"][lo:hi].astype(np.int64)
+                row = np.repeat(np.arange(stop - start), np.diff(indptr[start:stop + 1]))
+                keep = gene[cols] & (data != 0)
+                row, data, cols = row[keep], data[keep].astype(np.float64), cols[keep]
+                total[start:stop] = np.rint(np.bincount(row, weights=data, minlength=stop - start))
+                n_genes[start:stop] = np.bincount(row, minlength=stop - start)
+                is_mt = mito[cols]
+                mt[start:stop] = np.rint(np.bincount(row[is_mt], weights=data[is_mt], minlength=stop - start))
+                start = stop
+    except (OSError, KeyError, ValueError, IndexError, TypeError) as exc:
+        raise DataError(f"{path} is not a readable feature-barcode matrix ({exc})") from exc
+    return passes_qc(n_genes, total, qc_pct_mt(mt, total), qc), total
+
+
+def fine_bin_rows(bin_dir: Path, fine_dir: Path, run_um: int, run_raw: list[str], run_src: np.ndarray
+                  ) -> tuple[list[str], np.ndarray, dict]:
+    """(8 um barcodes as in square_008um/filtered_feature_bc_matrix.h5, for each the section row of the per-bin
+    table whose calls it takes or -1, how the parents were found). run_raw, run_src: the barcodes of the run's matrix
+    and the section row of each. The parent of an 8 um bin comes from the grid indices (parent_keys), checked against
+    the bin centres of the two tissue positions files; when any bin's centre lies outside the square of its parent by
+    index, every bin takes the bin whose centre is nearest instead. DataError when the barcodes are not Visium HD bin
+    barcodes."""
+    raw = matrix_barcodes(fine_dir / "filtered_feature_bc_matrix.h5")
+    fine_size, fine_keys = hd_grid_keys(raw)
+    run_size, run_keys = hd_grid_keys(run_raw)
+    fine_keys[fine_size != LOUPE_BIN_UM] = -1
+    run_keys[run_size != run_um] = -1
+    if not (fine_keys >= 0).any() or not (run_keys >= 0).any():
+        raise DataError("the barcodes are not Visium HD bin barcodes (s_<size>um_<row>_<column>)")
+    parents = parent_keys(fine_keys, LOUPE_BIN_UM, run_um)
+    check = {"method": "grid", "checked": 0, "inside": 0, "note": None}
+    fine_pos, run_pos = positions_file(fine_dir / "spatial"), positions_file(bin_dir / "spatial")
+    if fine_pos is None or run_pos is None:
+        check["note"] = "not checked against the bin centres: a tissue positions file is missing"
+    else:
+        try:
+            by_position = nearest_parent_keys(fine_pos, run_pos, fine_keys)
+        except DataError as exc:
+            check["note"] = f"not checked against the bin centres ({exc})"
+        else:
+            both = (by_position >= 0) & (parents >= 0)
+            check["checked"] = int(both.sum())
+            check["inside"] = int((both & (by_position == parents)).sum())
+            if not check["checked"]:
+                check["note"] = "not checked against the bin centres: no bin has a position in both files"
+            elif check["inside"] < check["checked"]:
+                check["method"] = "position"
+                parents = by_position
+    valid = np.flatnonzero(run_keys >= 0)
+    lookup = pd.Index(run_keys[valid])
+    if not lookup.is_unique:
+        first = ~lookup.duplicated()
+        lookup, valid = lookup[first], valid[first]
+    hit = lookup.get_indexer(parents)
+    src = np.where(hit >= 0, run_src[valid[np.maximum(hit, 0)]], -1)
+    return raw, src, check
+
+
+def safe_file_part(text: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", str(text)).strip("-.") or "section"
+
+
+def remove_quietly(path) -> None:
+    with contextlib.suppress(OSError):
+        os.unlink(path)
+
+
+def loupe_export(df: pd.DataFrame, cfg: dict, bin_size: str, out, title: str = "", source: str = "") -> dict:
+    """Write the Loupe Browser export of a run into the zip file `out` (a path or a binary file): for each section a
+    category CSV at the run's bin size and, when that is a whole multiple of 8 um and the section has
+    square_008um/filtered_feature_bc_matrix.h5, one at 8 um (the bin size of Space Ranger's .cloupe file), in which
+    every 8 um bin takes the calls of the run bin that holds it and a last column, LOUPE_QC_HEADER, says whether the
+    8 um bin itself passes the run's quality control; then README.txt. df: the per-bin table
+    (per_bin_signature_calls_{B}.csv.gz, named `source`); cfg: the run's configuration with an absolute data_root.
+    Returns what README.txt reports. DataError when a section's data cannot be found or read (the zip is unusable
+    then)."""
+    try:
+        run_um = int(pc.bin_um(bin_size))
+    except ValueError as exc:
+        raise DataError(str(exc)) from None
+    if run_um < LOUPE_BIN_UM:
+        raise DataError(f"this run analysed {run_um} um bins; Loupe Browser files (.cloupe) of Visium HD data exist "
+                        f"for bins of {LOUPE_BIN_UM} um and larger only")
+    for col in ("barcode", "sample_id"):
+        if col not in df.columns:
+            raise DataError(f"the per-bin table has no {col} column")
+    sample_ids = df["sample_id"].map(category_label)
+    groups = dict(sample_ids.groupby(sample_ids, sort=False).indices)
+    if not groups:
+        raise DataError("the per-bin table has no bins")
+    entries = {s["id"]: s for s in config_samples(cfg)}
+    plan = []
+    for sid in [s for s in entries if s in groups] + [s for s in groups if s not in entries]:
+        sample = entries.get(sid)
+        if sample is None:
+            raise DataError(f"section {sid} of the per-bin table is not in the run's configuration, so its Space "
+                            f"Ranger outputs cannot be found")
+        bin_dir = pc.resolve_bin_dir(cfg, sample, bin_size)
+        if bin_dir is None:
+            raise DataError(f"the raw data of section {sid} can no longer be found (no square_{bin_size}/"
+                            f"filtered_feature_bc_matrix.h5 in {sample_base(cfg, sample)}); the Loupe Browser export "
+                            f"lists the barcodes of the Space Ranger outputs the run analysed")
+        fine_dir = None
+        if run_um > LOUPE_BIN_UM and run_um % LOUPE_BIN_UM == 0:
+            fine_dir = pc.resolve_bin_dir(cfg, sample, LOUPE_BIN_SIZE)
+        plan.append((sid, sample, bin_dir, fine_dir))
+
+    columns, left_out = loupe_columns(df)
+    qc, _ = qc_thresholds(cfg)
+    clustering = cfg.get("clustering") if isinstance(cfg.get("clustering"), dict) else {}
+    report = {"title": title, "source": source, "bin_size": bin_size, "bin_um": run_um,
+              "columns": [{"header": c.header, "source": c.source, "kind": c.kind, "categories": c.categories}
+                          for c in columns],
+              "left_out": left_out, "sections": [], "qc": qc,
+              "min_domain_bins": clustering.get("min_domain_bins")}
+    headers = [c.header for c in columns]
+    qc_header = LOUPE_QC_HEADER
+    while qc_header.casefold() in {h.casefold() for h in headers}:
+        qc_header += " 2"
+    barcode_values = df["barcode"].to_numpy(object)
+    with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for sid, sample, bin_dir, fine_dir in plan:
+            section = {"id": sid, "label": sample.get("label") or sid, "folder": str(bin_dir.parent), "files": [],
+                       "notes": []}
+            idx = groups[sid]
+            matrix = bin_dir / "filtered_feature_bc_matrix.h5"
+            raw = matrix_barcodes(matrix)
+            table = ["" if v is None or (not isinstance(v, str) and pd.isna(v)) else str(v)
+                     for v in barcode_values[idx].tolist()]
+            rows = run_barcode_rows(pd.Index(make_unique(norm_barcodes(raw).tolist())), table, sid)
+            matched = np.flatnonzero(rows >= 0)
+            if len(idx) and not len(matched):
+                raise DataError(f"none of the {len(idx):,} bins of section {sid} in the per-bin table is a barcode of "
+                                f"{matrix}; is this the data the run analysed?")
+            src = np.full(len(raw), -1, np.int64)  # per matrix barcode: its row among the section's rows of the table
+            src[rows[matched]] = matched
+            texts, combo = loupe_texts(columns, idx)
+            name = f"{safe_file_part(sid)}_{bin_size}_categories.csv"
+            write_loupe_csv(zf, name, headers, raw, src, texts, combo)
+            analyzed = int((src >= 0).sum())
+            section["files"].append({"file": name, "bin_size": bin_size, "bin_um": run_um, "rows": len(raw),
+                                     "analyzed": analyzed, "unplaced": int(len(idx) - analyzed)})
+            if fine_dir is not None:
+                try:
+                    fine_raw, fine_src, check = fine_bin_rows(bin_dir, fine_dir, run_um, raw, src)
+                except DataError as exc:
+                    section["notes"].append(f"no {LOUPE_BIN_UM} um file: {exc}")
+                else:
+                    # the bin's own quality control: its calls are those of the run bin that holds it, whatever its
+                    # own depth, so that a low-quality 8 um bin can be told apart in Loupe Browser
+                    entry = {"file": f"{safe_file_part(sid)}_{LOUPE_BIN_SIZE}_categories.csv",
+                             "bin_size": LOUPE_BIN_SIZE, "bin_um": LOUPE_BIN_UM, "rows": len(fine_raw),
+                             "analyzed": int((fine_src >= 0).sum()), "parents": check, "qc": None}
+                    extra = None
+                    try:
+                        passes, umis = matrix_qc(fine_dir / "filtered_feature_bc_matrix.h5", qc)
+                    except DataError as exc:
+                        section["notes"].append(f"no {qc_header} column: {exc}")
+                    else:
+                        labelled = fine_src >= 0
+                        entry["qc"] = {"header": qc_header, "pass": int(passes.sum()),
+                                       "labelled_fail": int((labelled & ~passes).sum()),
+                                       "labelled_no_umi": int((labelled & (umis == 0)).sum()),
+                                       "unlabelled_pass": int((~labelled & passes).sum())}
+                        extra = (qc_header, ["pass" if ok else "fail" for ok in passes.tolist()])
+                    write_loupe_csv(zf, entry["file"], headers, fine_raw, fine_src, texts, combo, extra)
+                    section["files"].append(entry)
+            elif run_um > LOUPE_BIN_UM:
+                section["notes"].append(
+                    f"no {LOUPE_BIN_UM} um file: {run_um} um is not a whole multiple of {LOUPE_BIN_UM} um"
+                    if run_um % LOUPE_BIN_UM else f"no {LOUPE_BIN_UM} um file: the section has no "
+                    f"square_{LOUPE_BIN_SIZE}/filtered_feature_bc_matrix.h5")
+            report["sections"].append(section)
+        zf.writestr("README.txt", loupe_readme(report).encode("utf-8"))
+    return report
+
+
+def loupe_readme(report: dict) -> str:
+    """README.txt of the export: which file goes with which .cloupe file, how to import it, what the columns mean."""
+    run_um = report["bin_um"]
+    lines = ["BONE SPATIAL STUDIO - CATEGORIES FOR LOUPE BROWSER", ""]
+    if report.get("title"):
+        lines.append(f"Run: {report['title']}")
+    lines += [f"Calls from: {report.get('source') or 'the per-bin table'} ({run_um} um bins)",
+              f"Written: {time.strftime('%Y-%m-%d %H:%M')}", "",
+              "These CSV files put the calls of the run on the bins of 10x Genomics Loupe Browser, next to Loupe's",
+              "own clusters. Loupe imports a file into the .cloupe file of one section at one bin size, and only",
+              "into that one: the barcodes must be the bins of that .cloupe file.", "",
+              "FILES", "-----"]
+    for section in report["sections"]:
+        lines += [f"Section {section['id']} ({section['label']})", f"  Space Ranger output: {section['folder']}"]
+        for f in section["files"]:
+            lines.append(f"  {f['file']}")
+            if f["bin_um"] == LOUPE_BIN_UM:
+                lines.append(f"    for the section's own Loupe file at {LOUPE_BIN_UM} um, outs/cloupe_{LOUPE_BIN_SIZE}"
+                             f".cloupe (Space Ranger writes it for every Visium HD run)")
+            else:
+                lines += [f"    for a {f['bin_um']} um Loupe file, if you have one: Space Ranger writes it only when "
+                          f"run with --custom-bin-size {f['bin_um']}",
+                          f"    (spaceranger count 3.1 or later); not for cloupe_{LOUPE_BIN_SIZE}.cloupe"]
+            if "parents" in f:
+                lines.append(f"    {f['rows']:,} bins (every barcode of square_{f['bin_size']}/"
+                             f"filtered_feature_bc_matrix.h5): {f['analyzed']:,} take the calls of their "
+                             f"{run_um} um bin, {f['rows'] - f['analyzed']:,} are \"{LOUPE_NOT_ANALYZED}\"")
+                q = f.get("qc")
+                if q:
+                    lines.append(f"    column \"{q['header']}\": {q['pass']:,} bins pass the run's quality control "
+                                 f"at {LOUPE_BIN_UM} um; {q['labelled_fail']:,} of the {f['analyzed']:,} with calls "
+                                 f"fail it ({q['labelled_no_umi']:,} have no UMI at all), and {q['unlabelled_pass']:,} "
+                                 f"\"{LOUPE_NOT_ANALYZED}\" bins pass it")
+            else:
+                lines.append(f"    {f['rows']:,} bins (every barcode of square_{f['bin_size']}/"
+                             f"filtered_feature_bc_matrix.h5): {f['analyzed']:,} analysed, "
+                             f"{f['rows'] - f['analyzed']:,} \"{LOUPE_NOT_ANALYZED}\"")
+                if f.get("unplaced"):
+                    lines.append(f"    {f['unplaced']:,} bins of the per-bin table are not in that matrix and "
+                                 f"are left out")
+        lines += [f"  Note: {n}" for n in section["notes"]]
+        lines.append("")
+
+    fine = [(s, f) for s in report["sections"] for f in s["files"] if "parents" in f]
+    qc_col = next((f["qc"]["header"] for _, f in fine if f.get("qc")), None)
+    if fine:
+        ratio = run_um // LOUPE_BIN_UM
+        lines += [f"{LOUPE_BIN_UM} UM FILES", "-" * len(f"{LOUPE_BIN_UM} UM FILES"),
+                  f"An {LOUPE_BIN_UM} um bin takes the calls of the {run_um} um bin that holds it. Space Ranger's grids",
+                  f"of all bin sizes start at the same corner, so {LOUPE_BIN_UM} um bin (row r, column c) lies in "
+                  f"{run_um} um bin",
+                  f"(r // {ratio}, c // {ratio}). This was checked against the bin centres of the tissue positions "
+                  f"files:"]
+        for s, f in fine:
+            p = f["parents"]
+            if p["note"]:
+                lines.append(f"  {s['id']}: {p['note']}")
+            elif p["method"] == "grid":
+                lines.append(f"  {s['id']}: the centre of each of the {p['checked']:,} {LOUPE_BIN_UM} um bins lies "
+                             f"inside its {run_um} um bin (its nearest {run_um} um centre)")
+            else:
+                lines.append(f"  {s['id']}: {p['checked'] - p['inside']:,} of {p['checked']:,} {LOUPE_BIN_UM} um "
+                             f"centres lie outside the {run_um} um bin of that row and column, so every "
+                             f"{LOUPE_BIN_UM} um bin took the calls of the {run_um} um bin whose centre is nearest")
+        lines += ["", f"The calls are those of the {run_um} um bin; the {LOUPE_BIN_UM} um bin's own counts play no part. "
+                  f"So an {LOUPE_BIN_UM} um bin",
+                  "that would fail quality control on its own takes calls too, even a bin without any UMI."]
+        if qc_col:
+            qc = report.get("qc") or {}
+            lines += [f"The last column, \"{qc_col}\", says \"pass\" or \"fail\" for each {LOUPE_BIN_UM} um bin "
+                      f"by the run's own thresholds",
+                      f"(more than {qc.get('min_genes'):g} genes, more than {qc.get('min_counts'):g} UMIs and less "
+                      f"than {qc.get('max_pct_mt'):g}% mitochondrial UMIs in the bin): leave out",
+                      "the \"fail\" bins before you compare groups in Loupe Browser (a differential expression, for "
+                      "example).",
+                      f"The run's own projection onto {LOUPE_BIN_UM} um bins (step \"{pc.STEP_LABELS['project_fine_bins']}"
+                      f"\") labels only the",
+                      "bins that pass."]
+        lines.append("")
+
+    lines += ["HOW TO IMPORT", "-------------",
+              "1. Open the section's .cloupe file in Loupe Browser 8 or later (9.1 or later for 11 mm slides).",
+              "2. In the Clusters panel on the left, click the upload icon next to \"+ Create a new group\".",
+              "   Older versions: in Categories mode, open the action menu next to the category name and choose",
+              "   \"Import Categories\".",
+              "3. Choose the CSV file of that section and bin size. Each column becomes a group (category) of its",
+              "   own; choose one to color the bins by its labels.",
+              "If Loupe Browser reports \"Empty barcode list supplied\", the file is not the one for this .cloupe file",
+              "(another section or bin size), or a program changed it after the export (a spreadsheet program that",
+              "saved it again, for example): use the file as it is in this zip.",
+              "In Loupe Browser, the \"barcodes\" (and \"cells\") of Visium HD data are bins.", "",
+              "COLUMNS", "-------"]
+    described = [("barcode", "the bin's barcode in Space Ranger's filtered matrix, e.g. s_008um_00269_00526-1 "
+                             "(bin size, row, column)")]
+    for c in report["columns"]:
+        described.append((c["header"], f"{c['source']}: {loupe_column_text(c, report.get('min_domain_bins'))}"))
+    width = max(len(name) for name, _ in described) + 2
+    lines += [f"{name.ljust(width)}{text}" for name, text in described]
+    pad = " " * 18
+    if qc_col:
+        lines.append(f"{qc_col.ljust(width)}{LOUPE_BIN_SIZE} files only: \"pass\" or \"fail\", the "
+                     f"{LOUPE_BIN_UM} um bin's own quality control (see {LOUPE_BIN_UM} UM FILES)")
+    lines += ["", f"In every column{f' but {qc_col}' if qc_col else ''}:",
+              f"  \"{LOUPE_NOT_ANALYZED}\"  the bin is in Space Ranger's filtered matrix (so in the .cloupe file), but "
+              f"the run has no calls",
+              f"{pad}for it: in a {run_um} um file, the bin did not pass quality control or has no position"
+              + (";" if fine else ".")]
+    if fine:
+        lines.append(f"{pad}in an {LOUPE_BIN_UM} um file, the {run_um} um bin holding it was not analysed (the "
+                     f"{LOUPE_BIN_UM} um bin itself may pass).")
+    lines.append(f"  \"{LOUPE_MISSING}\"{' ' * 12}the bin was analysed but has no value in this column.")
+    if report["left_out"]:
+        lines += ["Not exported:"] + [f"  {col}: {why}" for col, why in report["left_out"]]
+    lines += ["The columns follow the run's configuration: a run with other signatures, classes or steps has other",
+              "columns, read the same way.", "",
+              "FORMAT", "------",
+              "Comma-separated text, UTF-8 without a byte-order mark, LF line endings. The first row holds the",
+              "column names; the first column is \"barcode\"; one row per bin; every cell holds a label (none is",
+              "empty); labels hold no commas, quotes or line breaks (a comma in a name became \";\").",
+              "This follows 10x Genomics' description of category CSV files. Where it says nothing, the most",
+              "compatible choice was made: the header \"barcode\" in lower case as documented (Loupe's own exports",
+              "write \"Barcode\"), the -1 suffix kept on every barcode, a label in every cell. The files were not",
+              "tried in Loupe Browser itself.", ""]
+    return "\n".join(lines)
+
+
+def loupe_column_text(column: dict, min_domain_bins=None) -> str:
+    """What a category column of the export holds (README.txt); min_domain_bins: the run's
+    clustering.min_domain_bins (domains smaller than it are "unassigned")."""
+    source, cats = column["source"], column["categories"]
+    small = (f"domains under {min_domain_bins:,} bins" if isinstance(min_domain_bins, int)
+             and not isinstance(min_domain_bins, bool) else "domains smaller than clustering.min_domain_bins")
+    known = {
+        "tissue_class": "the drawn tissue class of the bin's assigned signature (\"removed\": a signature whose class "
+                        "is not drawn; \"unassigned\": no single best signature)",
+        "assigned_signature": "the signature the bin was assigned to (\"ambiguous\": no single best signature)",
+        "leiden_domain": "the bin's Leiden domain (\"domain 0\", \"domain 1\", ...; \"unresolved\": domains of "
+                         f"ubiquitous transcripts merged; \"unassigned\": {small})",
+        "in_region_of_interest": "\"inside\" or \"outside\" the region of interest",
+    }
+    if source in known:
+        return known[source]
+    if column["kind"] == "bool":
+        yes, no = yes_no_labels(source)
+        what = ""
+        if source.endswith("_pooled_depthmatched"):
+            what = "positivity call after spatial pooling and depth matching: "
+        elif source.endswith("_pooled"):
+            what = "positivity call after spatial pooling: "
+        elif source.startswith("positive_"):
+            what = "positivity call: "
+        return f"{what}\"{yes}\" or \"{no}\""
+    shown = ", ".join(f"\"{c}\"" for c in cats[:6])
+    return f"{len(cats)} labels ({shown}{', ...' if len(cats) > 6 else ''})"
 
 
 # ============================================================================
@@ -1843,6 +2491,11 @@ def create_app(workspace: Path, token: str | None = None, worker_module: str = "
         given = optional_object(body, "config")
         cfg = pc.merge_with_defaults(given if given is not None else project.get("config") or {})
         errors, warnings = check_config(cfg)
+        data = body.get("data", True)
+        if not isinstance(data, bool):
+            raise HTTPException(400, "data must be true or false")
+        if not data:  # the configuration check alone (the project page checks the unsaved settings as they change)
+            return JSONOut({"ok": not errors, "errors": errors, "warnings": warnings})
         acfg = anchored(cfg)
         reports, panels = [], []
         for sample in config_samples(acfg):
@@ -2252,6 +2905,34 @@ def create_app(workspace: Path, token: str | None = None, worker_module: str = "
         link, section = run_gene_link(rid, sid)
         used, missing, cols = section.resolve(names)
         return JSONOut({**sparse_vector(link.counts(section, cols), used, missing), "n_unmatched": link.n_unmatched})
+
+    @app.get("/api/runs/{rid}/export/loupe")
+    def export_loupe(rid: str):
+        require_run(rid)
+        record = jobs.get_run(rid)
+        status = record.get("status")
+        if jobs.is_busy(rid) or status in ACTIVE_STATUSES:
+            raise HTTPException(409, f"run {rid} is {status}; export it for Loupe Browser when it has finished")
+        cfg = run_config(rid)
+        try:
+            path = per_bin_file(storage.results_dir(rid), cfg)
+        except NotFound:
+            raise NotFound(f"run {rid} has no per-bin table (per_bin_signature_calls_*.csv.gz)"
+                           + ("" if status == "succeeded" else f": it stopped ({status}) before writing one")) from None
+        m = PER_BIN_RE.match(path.name)
+        bin_size = f"{int(m.group(1)):03d}um" if m else cfg.get("bin_size")
+        df = bins_table(rid).df
+        title = " - ".join(str(v) for v in dict.fromkeys([rid, record.get("label"), record.get("project_name")]) if v)
+        # built in a temporary file, so that an error is still a JSON answer and only one CSV is in memory at a time
+        fd, tmp = tempfile.mkstemp(prefix="bss-loupe-", suffix=".zip")
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                loupe_export(df, anchored(cfg), bin_size, fh, title=title, source=path.name)
+        except BaseException:
+            remove_quietly(tmp)
+            raise
+        return FileResponse(tmp, media_type="application/zip", filename=f"{rid}_loupe.zip",
+                            headers={"Cache-Control": "no-store"}, background=BackgroundTask(remove_quietly, tmp))
 
     # ---- demo --------------------------------------------------------------------------------------------------
     @app.post("/api/demo")
