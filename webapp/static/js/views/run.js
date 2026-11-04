@@ -8,7 +8,7 @@ import {
 import { logView, downloadText } from '../components/log-view.js';
 import { tableBrowser, fileUrl, formatNumber } from '../components/table-viewer.js';
 import { figureGallery } from '../components/figure-gallery.js';
-import { spatialViewer } from '../components/spatial-viewer.js';
+import { spatialViewer, runSource } from '../components/spatial-viewer.js';
 
 const ACTIVE = new Set(['queued', 'running']);
 const FAILED = new Set(['failed', 'interrupted']);
@@ -606,7 +606,7 @@ export async function renderRun(container, { id, tab }) {
     let emptyText;
     if (isActive()) emptyText = 'The per-bin map is available when the run finishes (it reads the per-bin signature calls).';
     else if (st.run.status !== 'succeeded') emptyText = 'The run stopped before writing the per-bin table (per_bin_signature_calls), so there is nothing to map.';
-    const v = spatialViewer({ runId: id, store: st.viewerStore, binUm: binUmOf(st.run.config), emptyText });
+    const v = spatialViewer({ source: runSource(id), store: st.viewerStore, binUm: binUmOf(st.run.config), emptyText });
     return { el: v.el, destroy: v.destroy };
   }
 

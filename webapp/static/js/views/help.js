@@ -48,6 +48,13 @@ const workflow = () => [
     ],
   },
   {
+    title: 'Look at the raw data',
+    body: [
+      'The ', h('em', null, 'Explore'), ' tab reads every section as Space Ranger wrote it, with the current settings (saved or not) and before any run: a table of the bins, genes and UMIs of each section, the median UMIs, genes and mitochondrial share per bin, and how many bins pass the quality control set under Parameters; maps of these per-bin numbers or of any gene (several are summed), in one, two or four linked panels with the H&E image underneath; and the genes of a section ranked by UMIs, each with ',
+      h('em', null, 'Show on map'), ' and ', h('em', null, 'Overlay'), '. The ', h('em', null, 'Explore'), ' button next to a section in the Data tab opens it there.',
+    ],
+  },
+  {
     title: 'Review the parameters and gene signatures',
     body: [
       'The ', h('em', null, 'Parameters'), ' tab covers quality control, normalization and Leiden domains, scoring and positivity, the region of interest, compartments, distances, proximity and Moran’s I; every field explains itself and the defaults reproduce the manuscript. The ',
@@ -74,7 +81,7 @@ const workflow = () => [
       h('em', null, 'Summary'), ': bins per section through quality control and the region of interest, and the key numbers with their confidence intervals. ',
       h('em', null, 'Figures'), ': the manuscript figures as PNG and PDF. ',
       h('em', null, 'Tables'), ': every CSV output, searchable and sortable, plus the AnnData object for further work in Python. ',
-      h('em', null, 'Spatial viewer'), ': every bin at its position, colored by tissue class, assigned signature, Leiden domain, region of interest, a positivity call or the UMI count.',
+      h('em', null, 'Spatial viewer'), ': every bin at its position, colored by tissue class, assigned signature, Leiden domain, region of interest, a positivity call, the UMI count or the counts of any genes (numbers and counts are colored up to their 99th percentile, marked ≥ in the legend, so that a few extreme bins do not flatten the map); one, two or four panels side by side with linked pan and zoom and, for panels colored by the same gene or number, one shared color scale (Color scales → Shared); yes/no overlays (calls, region of interest, “gene detected”) on top and the H&E image underneath.',
     ],
   },
   {
@@ -89,6 +96,8 @@ const workflow = () => [
 
 const GLOSSARY = [
   ['Bin', 'Visium HD captures expression on a continuous grid of 2 × 2 µm squares; Space Ranger sums them into square bins of 8 and 16 µm (square_008um/, square_016um/). A bin is the unit of the analysis — a small patch of tissue that usually holds parts of several cells, not a cell.'],
+  ['UMI', 'Unique molecular identifier: every captured transcript is counted once, so the UMIs of a bin are the transcripts detected in it, its capture depth. A gene is detected in a bin when it has at least one UMI there.'],
+  ['Quality control', 'A bin enters the analysis when it detects more than qc.min_genes genes, has more than qc.min_counts UMIs and has less than qc.max_pct_mt percent of its UMIs on mitochondrial genes (names starting with mt-). The Explore tab shows how many bins pass with the current thresholds before anything runs.'],
   ['Region of interest', 'The bins the section-level numbers are computed on. Its transcriptional part drops bins scoring above the 90th percentile for skeletal muscle, nerve or smooth muscle (tissue around the bone); a region drawn on the H&E image can be intersected with it. Positivity rates, fold changes and distances are computed inside it.'],
   ['Depth matching', 'Sections differ in capture depth (UMIs per bin), and a deeper section detects more of every signature. Depth matching downsamples the raw counts of every bin above the median UMIs per bin of the shallowest section to that median (in every section; bins below it are kept), several times, and reports the mean (± SD) over these replicates, so rates are compared at equal depth.'],
   ['Null threshold', 'For each signature, random gene sets of the same size are scored the same way on a sample of bins. The 95th percentile of those null scores is the threshold: a bin above it scores higher than 95% of random gene sets would.'],
@@ -104,7 +113,7 @@ const GLOSSARY = [
 const SHORTCUTS = [
   ['Figures', 'Click a figure to enlarge it; ← and → step through the figures, a click on the image switches between fitting the window and actual size, Esc closes.'],
   ['Tables', 'Click a column header to sort (again to reverse); the search box filters every column; Esc clears it.'],
-  ['Spatial viewer', 'Drag to pan, scroll or double-click to zoom (Shift + double-click zooms out); with the map focused, the arrow keys pan, + and − zoom and 0 fits the section. Click a legend entry to hide or show it, Alt + click to show only that entry.'],
+  ['Maps (Spatial viewer, Explore)', 'Drag to pan, scroll or double-click to zoom (Shift + double-click zooms out); with a map focused, the arrow keys pan, + and − zoom and 0 fits the section (every panel’s section while the views are linked). Click a legend entry to hide or show it, Alt + click to show only that entry. In a gene box, ↑ and ↓ pick a suggestion and Enter shows it; commas separate genes whose counts are summed.'],
   ['Log', 'The log follows new output until you scroll up; “Jump to latest” returns to the end.'],
 ];
 

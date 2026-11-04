@@ -242,30 +242,78 @@
   .tv-side { position: static; max-height: none; }
 }
 
-/* ---------------------------------------------------------------- spatial viewer */
-.sv { display: flex; flex-direction: column; gap: 12px; }
+/* ---------------------------------------------------------------- spatial viewer (components/spatial-viewer.js) */
+/* map height: the window less what must be seen with the maps; --sv-lead (space above the first maps) and --sv-row
+   (what a second row of panels adds above its maps) are measured by the viewer */
+.sv {
+  display: flex; flex-direction: column; gap: 12px;
+  --sv-stage-h: clamp(420px, calc(100vh - var(--sv-lead, 380px) - 20px), 900px);
+}
+.sv[data-layout="2"] { --sv-stage-h: clamp(360px, calc(100vh - var(--sv-lead, 440px) - 20px), 760px); }
+.sv[data-layout="4"] { --sv-stage-h: clamp(200px, calc((100vh - var(--sv-lead, 340px) - var(--sv-row, 180px) - 20px) / 2), 560px); }
 .sv-toolbar {
-  display: flex; align-items: flex-end; gap: 12px 16px; flex-wrap: wrap; padding: 12px 14px;
+  display: flex; align-items: flex-end; gap: 12px 18px; flex-wrap: wrap; padding: 12px 14px;
   background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg);
 }
-.sv-control { display: flex; flex-direction: column; gap: 4px; min-width: 170px; }
-.sv-control-wide { min-width: 250px; }
-.sv-control > label { font-size: 12px; font-weight: 600; color: var(--text-muted); }
-.sv-range-row { display: flex; align-items: center; gap: 8px; height: 34px; }
-.sv-range { width: 130px; accent-color: var(--accent); }
+.sv-control { display: flex; flex-direction: column; gap: 4px; min-width: 150px; }
+.sv-control-auto { min-width: 0; }
+.sv-control > label, .sv-control-label { font-size: 12px; font-weight: 600; color: var(--text-muted); }
+.sv-range-row, .sv-switch-row { display: flex; align-items: center; gap: 10px; height: 32px; }
+.sv-range { width: 120px; accent-color: var(--accent); }
+.sv-range:disabled { opacity: 0.45; }
 .sv-size-out { min-width: 38px; font-size: 12.5px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
-.sv-body { display: grid; grid-template-columns: minmax(0, 1fr) 260px; gap: 16px; align-items: start; }
-.sv-stage {
-  position: relative; height: clamp(420px, calc(100vh - 320px), 900px); overflow: hidden;
-  background: var(--plot-bg); border: 1px solid var(--border); border-radius: var(--radius-lg);
+.sv-layout { height: 32px; align-items: center; }
+.sv-layout .btn { min-width: 34px; font-variant-numeric: tabular-nums; }
+.sv-note { margin: 0; font-size: 11.5px; color: var(--text-faint); }
+
+/* panels: 1, 2 or 4 (2 x 2); one column in narrow windows */
+.sv-panels { display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr); align-items: start; }
+.sv[data-layout="2"] .sv-panels, .sv[data-layout="4"] .sv-panels { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.sv-panel { display: flex; flex-direction: column; min-width: 0; }
+.sv-panel-head { display: flex; align-items: center; gap: 8px; min-height: 42px; padding: 9px 14px; border-bottom: 1px solid var(--border); }
+.sv-panel-title { flex: 1 1 auto; min-width: 0; font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sv-panel-controls { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px 12px; padding: 10px 14px; border-bottom: 1px solid var(--border); }
+.sv-panel-controls .sv-control { flex: 1 1 150px; min-width: 0; max-width: 320px; }
+.sv-panel-controls .sv-control-wide { flex: 2 1 240px; max-width: none; }
+/* two or four panels: section, coloring and overlays on one line */
+.sv:not([data-layout="1"]) .sv-panel-controls { align-content: flex-start; gap: 8px 10px; padding: 8px 12px; }
+.sv:not([data-layout="1"]) .sv-panel-controls .sv-control { flex-basis: 110px; }
+.sv:not([data-layout="1"]) .sv-panel-controls .sv-control-wide { flex-basis: 200px; }
+.sv-ovl-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; padding: 8px 14px; border-bottom: 1px solid var(--border); }
+.sv-ovl-chips { flex: 1 1 auto; }
+.sv-chip { font-family: var(--font); }
+.sv-dim { font-size: 12.5px; color: var(--text-muted); }
+.sv-panel-body { display: grid; grid-template-columns: minmax(0, 1fr); }
+.sv[data-layout="1"] .sv-panel-body { grid-template-columns: minmax(0, 1fr) 260px; }
+
+/* gene box with suggestions */
+.sv-gene-box { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.sv-gene-field { position: relative; flex: 1 1 auto; min-width: 0; }
+.sv-suggest {
+  position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 20; max-height: 280px; overflow: auto;
+  margin: 0; padding: 4px; list-style: none;
+  background: var(--surface-2); border: 1px solid var(--border-strong); border-radius: var(--radius); box-shadow: var(--shadow-lg);
 }
+.sv-suggest li {
+  display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 2px 12px;
+  padding: 5px 8px; border-radius: var(--radius-sm); cursor: pointer; font-size: 12.5px;
+}
+.sv-suggest li:hover, .sv-suggest li.active { background: var(--accent-soft); }
+.sv-suggest-gene { font-family: var(--mono); font-size: 12px; color: var(--text); overflow-wrap: anywhere; }
+.sv-suggest-meta { color: var(--text-muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+
+/* map */
+.sv-stage { position: relative; height: var(--sv-stage-h); overflow: hidden; background: var(--plot-bg); }
+.sv[data-layout="1"] .sv-stage { border-bottom-left-radius: calc(var(--radius-lg) - 1px); }
 .sv-canvas { position: absolute; inset: 0; display: block; width: 100%; height: 100%; cursor: grab; touch-action: none; }
 .sv-stage.dragging .sv-canvas { cursor: grabbing; }
-.sv-canvas:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; box-shadow: none; border-radius: var(--radius-lg); }
+.sv-canvas:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; box-shadow: none; border-radius: 0; }
 .sv-zoom { position: absolute; top: 10px; right: 10px; z-index: 2; display: flex; flex-direction: column; gap: 4px; }
 .sv-zoom .btn { background: var(--surface); box-shadow: var(--shadow-sm); }
+/* tooltip: placed in the window next to the pointer (the viewer keeps it off the pointer), never cut by a panel's edge */
 .sv-tip {
-  position: absolute; left: 0; top: 0; z-index: 3; max-width: 330px; padding: 8px 10px; pointer-events: none;
+  position: fixed; left: 0; top: 0; z-index: 40; max-width: min(330px, calc(100vw - 16px)); max-height: calc(100vh - 16px);
+  overflow: hidden; padding: 8px 10px; pointer-events: none;
   background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: var(--radius);
   box-shadow: var(--shadow-lg); font-size: 12px; line-height: 1.45;
 }
@@ -273,16 +321,25 @@
 .sv-tip-grid { display: grid; grid-template-columns: auto auto; gap: 0 14px; margin: 0; }
 .sv-tip-grid dt { color: var(--text-muted); }
 .sv-tip-grid dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.sv-tip-grid dd.mono { font-size: 11px; }
 .sv-tip-grid .on { color: var(--text); font-weight: 700; }
-.sv-overlay {
-  position: absolute; inset: 0; z-index: 4; display: flex; align-items: center; justify-content: center;
+.sv-tip-grid dd.sv-tip-calls { text-align: left; }
+.sv-msg {
+  position: absolute; inset: 0; z-index: 4; display: flex; align-items: center; justify-content: center; overflow: auto;
   background: color-mix(in srgb, var(--surface) 85%, transparent);
 }
-.sv-overlay-msg { width: calc(100% - 32px); max-width: 540px; }
-.sv-side { position: sticky; top: 16px; max-height: calc(100vh - 32px); overflow: auto; }
-.sv-legend-body { display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; }
-.sv-legend-title { font-size: 14px; }
+.sv-msg-body { width: calc(100% - 32px); max-width: 540px; }
+.sv-msg-body > .banner { margin-bottom: 0; }
+
+/* legend: beside the map with one panel; with two or four, beside it in a narrow column when the panel is wide enough
+   (see the end of this section), else under it */
+.sv-legend-body { display: flex; flex-direction: column; gap: 10px; min-width: 0; padding: 12px 14px; overflow: auto; }
+.sv[data-layout="1"] .sv-legend-body { max-height: var(--sv-stage-h); border-left: 1px solid var(--border); }
+.sv:not([data-layout="1"]) .sv-legend-body { max-height: 220px; border-top: 1px solid var(--border); }
+.sv-legend-body:empty { display: none; }
+.sv-legend-title { font-size: 14px; overflow-wrap: anywhere; }
 .sv-legend { display: flex; flex-direction: column; gap: 1px; }
+.sv:not([data-layout="1"]) .sv-legend { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 1px 8px; }
 .sv-item {
   display: flex; align-items: center; gap: 8px; width: 100%; padding: 4px 6px;
   border: 0; border-radius: var(--radius-sm); background: none; color: var(--text);
@@ -299,11 +356,57 @@
   display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-top: 8px;
   border-top: 1px solid var(--border); font-size: 12px; color: var(--text-muted);
 }
-.sv-note { margin: 0; font-size: 11.5px; color: var(--text-faint); }
+.sv-legend-section { display: flex; flex-direction: column; gap: 4px; padding-top: 8px; border-top: 1px solid var(--border); }
+.sv-ovl-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
+.sv-ovl { display: flex; align-items: center; gap: 8px; padding: 3px 6px; font-size: 12.5px; }
+/* bins in two or more overlays: light on the map, dark over the H&E image; the rim keeps the dark one visible here */
+.sv-swatch-ink { border-color: var(--text-faint); }
+.sv-facts { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: var(--text-muted); }
+.sv-warn { color: var(--warning); }
+.sv-hint { margin: 0; font-size: 12px; color: var(--text-faint); }
+.sv-error { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 6px; font-size: 12px; color: var(--danger); }
+.sv-error > span { flex: 1 1 140px; min-width: 0; overflow-wrap: anywhere; }
+.sv-busy { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-muted); }
+.sv-busy .spinner { width: 14px; height: 14px; border-width: 2px; }
+
 @media (max-width: 960px) {
-  .sv-body { grid-template-columns: minmax(0, 1fr); }
-  .sv-side { position: static; max-height: none; }
+  .sv[data-layout="1"] .sv-panel-body { grid-template-columns: minmax(0, 1fr); }
+  .sv[data-layout="1"] .sv-stage { border-bottom-left-radius: 0; }
+  .sv[data-layout="1"] .sv-legend-body { max-height: none; border-left: 0; border-top: 1px solid var(--border); }
 }
+@media (max-width: 760px) {
+  .sv[data-layout="2"] .sv-panels, .sv[data-layout="4"] .sv-panels { grid-template-columns: minmax(0, 1fr); }
+  .sv[data-layout="2"], .sv[data-layout="4"] { --sv-stage-h: clamp(300px, 62vh, 560px); }
+  .sv:not([data-layout="1"]) .sv-legend-body { max-height: none; }
+  .sv-range { width: 100px; }
+}
+/* side by side, the maps of a row line up whatever each panel shows above them (gene box, overlays): every panel spans
+   the same four rows of the grid (head, controls, overlays, map and legend) */
+@media (min-width: 761px) {
+  @supports (grid-template-rows: subgrid) {
+    .sv:not([data-layout="1"]) .sv-panels { row-gap: 0; grid-template-rows: repeat(4, auto); align-items: stretch; }
+    .sv[data-layout="4"] .sv-panels { grid-template-rows: repeat(4, auto) 16px repeat(4, auto); }
+    .sv:not([data-layout="1"]) .sv-panel { display: grid; grid-template-rows: subgrid; grid-row: 1 / span 4; }
+    .sv[data-layout="4"] .sv-panel:nth-child(n + 3) { grid-row: 6 / span 4; }
+    .sv:not([data-layout="1"]) .sv-panel-head { grid-row: 1; }
+    .sv:not([data-layout="1"]) .sv-panel-controls { grid-row: 2; }
+    .sv:not([data-layout="1"]) .sv-ovl-row { grid-row: 3; }
+    .sv:not([data-layout="1"]) .sv-panel-body { grid-row: 4; }
+  }
+}
+/* two or four panels: the legend in a narrow column beside the map when the panel is wide enough (sv-wide: set by the
+   viewer from the panel's width, 500 px with four panels, 700 px with two) */
+.sv:not([data-layout="1"]) .sv-panel.sv-wide .sv-panel-body { grid-template-columns: minmax(0, 1fr) 180px; }
+.sv:not([data-layout="1"]) .sv-panel.sv-wide .sv-legend-body {
+  max-height: var(--sv-stage-h); padding: 10px 12px; border-top: 0; border-left: 1px solid var(--border);
+}
+.sv:not([data-layout="1"]) .sv-panel.sv-wide .sv-legend { display: flex; flex-direction: column; }
+/* in that column an entry's count goes under its label, which keeps the width of the column (words not cut) */
+.sv:not([data-layout="1"]) .sv-panel.sv-wide .sv-item,
+.sv:not([data-layout="1"]) .sv-panel.sv-wide .sv-ovl {
+  display: grid; grid-template-columns: 12px minmax(0, 1fr); align-items: center; gap: 0 8px;
+}
+.sv:not([data-layout="1"]) .sv-panel.sv-wide .sv-item-count { grid-column: 2; font-size: 11.5px; }
 
 /* ---------------------------------------------------------------- help */
 .help-layout { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 24px; align-items: start; }

@@ -253,6 +253,50 @@ GET  /api/projects/{pid}/samples/{sid}/image-meta   -> {"width", "height", "fram
 GET  /api/projects/{pid}/samples/{sid}/bins-preview -> {"x": [..], "y": [..], "n_total": int}
      in-tissue bin centres of the analysis bin size in hires pixels (pxl * tissue_hires_scalef), at most 60,000
      (evenly subsampled); 404 when positions are missing
+
+Data explorer: the raw sections before any run. Every body may carry {"config": dict} (unsaved edits, exactly as
+/validate; default = saved config); the analysis bin size of that config is read. A section is read as
+bone_analysis.read_visium_hd reads it, with h5py + scipy.sparse in the server (no scanpy): the "Gene Expression"
+features of filtered_feature_bc_matrix.h5 (names made unique like var_names_make_unique), barcodes without their -<n>
+suffix (made unique), joined to the positions file by barcode, bins without coordinates dropped, matrix order kept.
+POST /api/projects/{pid}/explore/samples
+     -> {"bin_size", "samples": [{"id", "label", "condition", "color", "n_bins": int|null, "has_image": bool,
+         "ok": bool, "message": str}]}   cheap: n_bins = in-tissue rows of the positions file (the matrix is not read);
+        message = "1,234 bins at 016um" or why the section cannot be read (ok false also for more than 1,000,000 bins,
+        the most a section the explorer and the gene maps read: 002um sections have millions)
+POST /api/projects/{pid}/explore/{sid}/bins
+     -> the bin payload of GET /api/runs/{rid}/bins (sample, n, x, y in µm = full-res pixel * microns_per_pixel rounded
+        to 0.01 like the per-bin table's x_um/y_um, fields, "colors": {}) with fields total_umi, n_genes, pct_mt
+        (number; pct_mt rounded to 0.01, null for a bin without counts) and passes_qc (bool: n_genes > qc.min_genes,
+        total_umi > qc.min_counts, pct_mt < qc.max_pct_mt in float32 like bone_analysis.qc_metrics/qc_filter;
+        mitochondrial = gene name starting with "mt-", any case), plus
+        "barcodes": [..] (normalised: no -1 suffix),
+        "summary": {"n_bins", "n_barcodes" (matrix), "n_without_position", "n_features", "total_umi", "median_umi",
+                    "mean_umi", "median_genes", "median_pct_mt", "n_pass_qc", "pct_pass_qc", "bin_size",
+                    "microns_per_pixel", "qc": {"min_genes", "min_counts", "max_pct_mt"}, "matrix": path,
+                    "positions": path},
+        "image": {"url": "/api/explore-images/<key>", "px_per_um", "width", "height"} | null   (hires H&E;
+                 px_per_um = tissue_hires_scalef / microns_per_pixel: image pixel = x_um * px_per_um),
+        "notes": [str]   (no image and why; a qc threshold that is not a number, replaced by its default)
+     404 sample not in the config / no matrix / no positions; 422 unreadable files, microns_per_pixel unknown,
+     fewer than half of the barcodes with a position (the analysis' own check), or a matrix of more than 1,000,000
+     bins (refused from matrix/shape before its counts are read; also for /genes, /gene and the run gene maps)
+POST /api/projects/{pid}/explore/{sid}/genes  body {"config"?, "query"?: str, "limit"?: 1..500 (default 50)}
+     -> {"n_bins", "n_features", "n_matches", "genes": [{"gene", "total_umi", "n_bins_detected",
+         "pct_bins_detected"}]}   by total_umi descending (ties: panel order); query = case-insensitive substring
+POST /api/projects/{pid}/explore/{sid}/gene   body {"config"?, "genes": [1..50 names]}
+     -> sparse gene vector {"genes_used", "genes_missing", "n", "indices", "values", "total", "n_detected", "max"}:
+        per-bin sum of the raw counts of the genes, in the order of the bins payload; indices = bins with a count > 0.
+        A name matches exactly, else the first gene of that name in any case; a gene named twice counts once.
+GET  /api/explore-images/{key}  -> image/png   only keys the server issued while resolving an image (an HMAC of path,
+                                   modification time and size; a client never sends a path); 404 otherwise
+Caches (LRUCache: each key is built once, requests that arrive meanwhile wait for that build and get its value or
+its error; an error is not kept): the counts of the sections last used (CSC, keyed by matrix + positions path, mtime,
+size), at most 8 and 1 GB of their estimated memory (counts, per-bin arrays, about 300 bytes per barcode and gene; a
+16 µm section of 105,000 bins is about 100 MB, an 8 µm one of 412,000 bins about 200 MB; the newest is kept whatever
+its size); the encoded bins payloads, at most 8 and 128 MB (about 5 MB at 16 µm, 20 MB at 8 µm); 8 run-to-raw barcode
+matches (one per run, sample, per-bin table and section).
+
 GET    /api/projects/{pid}/roi/{sid}  -> GeoJSON FeatureCollection (404 if none)
 PUT    /api/projects/{pid}/roi/{sid}  body FeatureCollection of Polygon features, coordinates [x, y] in hires image
                                       pixels, properties {"frame": "hires"} -> {"ok": true, "n_polygons": int}
@@ -294,6 +338,14 @@ GET  /api/runs/{rid}/bins?sample=<sid>
          "colors": {"tissue_class": {name: "#hex"}, "assigned_signature": {slug: "#hex"}}}
      from per_bin_signature_calls_{B}.csv.gz (cached per run); colors from the run's config.json (classes, signatures;
      "removed" "#b8b8b8", "unassigned"/"ambiguous" "#dedede").
+GET  /api/runs/{rid}/bins/image?sample=<sid>  -> {"url", "px_per_um", "width", "height"} of the hires H&E image under
+     the bins of /bins (as in the explorer, with the run's config.json); 404 when there is none
+GET  /api/runs/{rid}/genes?sample=<sid>&query=&limit=50  -> as POST /explore/{sid}/genes plus "n_unmatched", over the
+     bins of the run's per-bin table (n_bins = its bins of that sample)
+POST /api/runs/{rid}/gene  body {"sample", "genes": [1..50]}  -> sparse gene vector + "n_unmatched", aligned to the
+     /bins order. The raw section is read again from the run's data_root; each per-bin barcode
+     (<normalised matrix barcode>-<sample id>, as anndata.concat(index_unique="-") wrote it) is matched to its raw bin
+     (fallbacks: as is, then normalised); unmatched bins count 0. 422 when the raw data can no longer be found.
 
 POST /api/demo                  -> {"project": project}   generates workspace/demo_data (once; ~1 min) with
                                    tools.make_demo_data.generate and creates a project "Demo — synthetic tibiae"
@@ -331,7 +383,7 @@ poll(), copyText(), clone(), state.health, refreshHealth(), route(), navigate(),
 danger, ghost, small, icon-only), .input/.select/.textarea, .field, .form-grid, .switch, .tabs, .badge(-status),
 .chip(.ok/.warn/.bad/.core), .table-wrap/.table, .kv, .metric, .progress, .log, .banner, .modal, .toast, .empty,
 .grid-2/.grid-3/.grid-auto, .row, .stack, .legend, .prose. Use them; put view-specific rules in css/project.css
-(projects, project editor, ROI editor) or css/run.css (runs, results, viewers). The interface has one dark theme; its
+(projects, project editor, ROI editor, data explorer) or css/run.css (runs, results, viewers). The interface has one dark theme; its
 colors come from the CSS variables on `:root` only — never hard-code colors except data colors (signature/sample
 palettes).
 
@@ -340,12 +392,95 @@ return a cleanup function (stop timers, remove listeners):
 ```
 #/projects                 views/projects.js  export async function renderProjects(container, {})
 #/projects/:id/:tab?       views/project.js   export async function renderProject(container, {id, tab})
-                           tabs: data | parameters | signatures | roi | run
+                           tabs: data | explore | parameters | signatures | roi | run
+                           explore = dataExplorer() on the draft config (section "Data explorer" below)
 #/runs                     views/runs.js      export async function renderRuns(container, {})
 #/runs/:id/:tab?           views/run.js       export async function renderRun(container, {id, tab})
                            tabs: progress | summary | figures | tables | viewer | config  (tab null -> progress
-                           while queued/running, summary when finished)
+                           while queued/running, summary when finished); viewer = spatialViewer(runSource(id))
 #/help/:topic?             views/help.js      export async function renderHelp(container, {topic})
                            topics: guide (default) | changes | architecture | readme
 ```
 Components live in js/components/ and are imported by the views.
+
+### Spatial viewer (components/spatial-viewer.js, styles in css/run.css)
+```
+spatialViewer({source, store, binUm, emptyText}) -> {el, destroy(), show({panel?, sample?, field?, genes?, overlays?})}
+runSource(runId) -> source        the Viewer tab of a run (GET /bins/samples, /bins, /genes, /bins/image; POST /gene)
+geneInput({id, label, placeholder, submitLabel, search, onSubmit, onCancel}) -> {el, input, set, focus, destroy}
+fieldLabel(key) -> display name of a per-bin field
+```
+* source = {name?, emptyText?, samples(signal) -> [{id, label, n}], bins(sampleId, signal) -> bin payload (the shape
+  of GET /api/runs/{rid}/bins, optional "barcodes"), genes?: {search(sampleId, query, signal) -> [{gene, total_umi,
+  n_bins_detected, pct_bins_detected}], values(sampleId, genes, signal) -> sparse gene vector}, image?(sampleId,
+  signal, {retry}) -> {url, px_per_um, width, height} | null (retry: asked again by the Retry of an image that failed
+  to load)}. Every method gets an AbortSignal; a 404 from samples() shows the empty state. The run viewer uses
+  runSource; the data explorer a source over the /explore endpoints.
+* 1, 2 or 4 panels (2 x 2; one column below 760 px), each with its own section (a new panel shows the first section
+  no panel before it shows), "Color by" (the payload's fields, or "Gene…": the summed counts of one or more genes, 0 in
+  the neutral color, detected bins on viridis with a log(1 + x) scale clamped at the 99th percentile of the nonzero
+  counts; numbers likewise from their smallest value to their 99th percentile, log(1 + x) for UMIs and genes per bin;
+  the color scale starts at viridis' quarter point, so the lowest step is brighter than the neutral color on the dark
+  background), overlays (boolean fields and "detected: <genes>"; each in the signature's configured color when free,
+  else a palette color apart from the other overlays and, while one is left, from the colors of the categories or
+  calls the panel is colored by; bins in two or more overlays in the theme's text color, in the dark text color of the exported
+  image over the H&E image and in that image; the coloring under them can be dimmed), a legend with counts and
+  click-to-hide entries, and a title (section + what is shown). "Color scales: Shared" (default on): panels colored by
+  the same genes or the same number use one range (the smallest low end, the largest 99th percentile), the legend
+  says whose range it shows. Pan and zoom are linked by default (one view in µm for all panels, with a crosshair at
+  the hovered position in the others); unlinked, each panel keeps its own view per section. The H&E image
+  (source.image) can be drawn under the bins, the bins then see-through by the chosen amount; it is asked for again
+  with {retry: true} only by the Retry of an image that failed to load. Save PNG writes one composite image of all
+  panels (title, map, scale bar, legend, with the notes of a shared or clamped color scale) on white.
+* Layout: the maps take the window's height less what must be seen with them (the viewer measures it: its place on
+  the page when one row of panels starts in the top half of the first screen, else its toolbar and controls; measured
+  again when the window is resized or the page above the viewer grows or shrinks; with four panels the second row is
+  measured on its own, and a map is at least 200 px high); with
+  two or four panels the maps of a row line up (the panels share the rows of a CSS subgrid), the controls of a panel
+  sit on one line, and a wide panel (500 px with four panels, 700 px with two) has its legend in a 180 px column
+  beside the map (an entry's count under its label), else under it. The tooltip of a bin (barcode, genes shown, the field colored by and the overlays in
+  bold, the other fields, the remaining positivity calls on one line) is placed in the window beside the pointer, or
+  above or below it, never cut by the panel.
+* store (kept by the caller between visits): layout, link, sameScale, view (linked), pointSize, image {on, opacity},
+  panels [{sample, field, genes, overlays, dim, hidden, views}], and the caches samples, data (prepared bins per
+  section, shared by the panels), geneData (the 40 gene vectors used last), images.
+* Bins are drawn into one offscreen layer per panel only when the data, the zoom or the style change; panning copies
+  the layers. Requests are shared by key across panels and aborted when no panel needs them any more.
+
+### Data explorer (components/data-explorer.js, styles in css/project.css)
+```
+exploreState(cfg, key, previous) -> state        kept in the project's draft between visits
+dataExplorer({projectId, name, state, getConfig, focus, onOpenData}) -> {el, destroy()}
+```
+* The Explore tab of a project: the raw sections before any run, read through the explorer endpoints (section 5) with
+  the draft config, so unsaved data settings are explored as /validate checks them. project.js keys the state by
+  dataKey(cfg) plus the qc thresholds (min_genes, min_counts, max_pct_mt); when that key changes, exploreState() starts
+  a new state (nothing read; the viewer choices and the gene filter are kept). The state holds the config snapshot the
+  requests send, the explore/samples answer, one entry per section ({status idle | loading | ok | error, summary, notes,
+  image}), the spatialViewer store, the highlighted panel and the gene filter. "Read again" re-reads everything.
+* Sections table: one row per configured section, filled as each one is read (sections one at a time, the ones on the
+  map first; a section that cannot be read shows why, a failed read has Retry): bins, genes in the matrix, UMIs,
+  median UMIs, genes and % mitochondrial per bin, bins passing QC, microns per pixel; the qc thresholds used, barcodes
+  without a position and the server's notes underneath. A section name shows that section in the highlighted panel.
+* Map: spatialViewer on a projectSource (samples = the readable sections, bins = POST /explore/{sid}/bins, genes =
+  /genes and /gene, image(sid, signal, {retry}) = the "image" of the section's bins payload, kept with the section;
+  only retry (the viewer's Retry of an image that failed to load) posts /bins again, for a new image address). One
+  bins request per section serves the table, the viewer and the image; payloads read ahead for the table are kept
+  (at most 2) until the viewer takes them. Default: one panel, UMIs per bin, H&E available.
+* Highlighted panel: the panel clicked or focused last, outlined when there are two or four. markTarget() keeps the
+  outline, the section of the gene table, the active row of the sections table and the gene rows in step with it; it
+  runs once the viewer is mounted (on every visit: with sections known from an earlier visit the viewer makes its
+  panels at once), when panels are made or removed (a MutationObserver), after a press, key, focus or change in the
+  viewer (its gene boxes add overlays on Enter or a suggestion's mousedown) and after each viewer.show() from the
+  explorer (section names, gene rows, the Data tab's Explore). Gene table: the
+  section's genes by UMIs (POST /genes, case-insensitive filter, 50 / 200 / 500 rows) with UMIs, bins detecting the
+  gene and their share; "Show on map" = viewer.show({panel, sample, genes: [gene]}); "Overlay" toggles
+  'gene:<gene>' in the panel's overlays: pressed (aria-pressed, a check icon) while the highlighted panel has it, a
+  click then removes it. The rows follow the overlays of the highlighted panel however they change, updated in place
+  (a focused button keeps the focus). Every row button is named by its text and its gene, the same in both states of
+  the toggle (aria-label: "Show on map: <gene>", "Overlay: <gene>"). Below 760 px the count of bins detecting the gene is left out (the share stays, its
+  title gives the count), below 480 px the buttons show their icon only (the title explains them). A "Gene table" jump
+  above the map (with four panels, and below 760 px where the panels stack) scrolls to the gene table and moves the
+  focus to it.
+* Data tab: every section the data check found has an Explore button (sampleEditor onExplore) and the Data check card
+  a pointer (reportPanel onExplore); both open the Explore tab (the section in the highlighted panel).

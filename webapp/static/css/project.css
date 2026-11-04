@@ -170,9 +170,65 @@ button.vchip { cursor: pointer; }
 .report-table .path-cell { max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .report-genes { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; }
 .report-genes-title { font-weight: 600; }
+.sample-status-row { display: flex; align-items: center; gap: 4px 8px; flex-wrap: nowrap; }
+.report-explore {
+  display: flex; align-items: center; gap: 8px 10px; flex-wrap: wrap; padding: 10px 12px; font-size: 13px;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border)); border-radius: var(--radius); background: var(--accent-soft);
+}
+.report-explore > .icon { color: var(--accent-text); }
+.report-explore > span { flex: 1 1 260px; min-width: 0; }
 .detect tr.known td { color: var(--text-muted); }
 .detect-folder { font-weight: 600; cursor: pointer; margin-right: 6px; }
 .detect input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent); }
+
+/* ---------------------------------------------------------------- explore tab (components/data-explorer.js; the viewer's
+   own rules are in run.css) */
+.dx { display: flex; flex-direction: column; gap: 20px; }
+.dx-table th, .dx-table td { vertical-align: middle; }
+.dx-table th { white-space: normal; vertical-align: bottom; line-height: 1.3; }
+.dx-table th.num { min-width: 64px; }
+.dx-table td { white-space: nowrap; }
+.dx-table .linklike { text-align: left; }
+.dx-table tbody tr.active td { background: color-mix(in srgb, var(--accent-soft) 75%, transparent); }
+.dx-table tbody tr.active td:first-child { box-shadow: inset 3px 0 0 var(--accent-text); }
+.dx-table tr.row-bad td { background: color-mix(in srgb, var(--danger-soft) 55%, transparent); }
+.dx-section { display: flex; align-items: center; gap: 8px; }
+.dx-section-text { display: flex; flex-direction: column; line-height: 1.25; min-width: 0; }
+.dx-section-label { font-weight: 600; }
+.dx-row-msg { display: flex; align-items: center; gap: 8px; color: var(--text-muted); white-space: normal; }
+.dx-row-msg > span:not(.spinner) { flex: 0 1 auto; min-width: 0; max-width: 760px; overflow-wrap: anywhere; }
+.dx-row-msg.bad { color: var(--danger); }
+.dx-row-msg .spinner { width: 14px; height: 14px; border-width: 2px; }
+.dx-act { width: 1%; text-align: right; }
+.dx-qc { margin: 0; font-size: 12.5px; color: var(--text-muted); }
+.dx-notes { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; color: var(--text-muted); }
+.dx-notes li { display: flex; align-items: flex-start; gap: 6px; }
+.dx-notes li > .icon { margin-top: 3px; color: var(--info); }
+.dx .sv:not([data-layout="1"]) .sv-panel.dx-target {
+  border-color: color-mix(in srgb, var(--accent-text) 70%, var(--border));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent-text) 45%, transparent);
+}
+/* the jump to the gene table above the map: with four panels, and wherever the panels stack (below 760 px, run.css) */
+.dx-jump { display: none; justify-content: flex-end; margin: -12px 0; }
+.dx-jump[data-panels="4"] { display: flex; }
+.dx-genes { scroll-margin-top: 16px; }
+.dx-gene-bar { display: flex; align-items: center; gap: 8px 14px; flex-wrap: wrap; }
+.dx-gene-bar .input { flex: 1 1 220px; max-width: 360px; }
+.dx-gene-bar .muted { display: inline-flex; align-items: center; gap: 8px; }
+.dx-gene-bar .spinner { width: 14px; height: 14px; border-width: 2px; }
+.dx-gene-body { transition: opacity 0.12s; }
+.dx-gene-body.busy { opacity: 0.6; }
+.dx-gene-wrap { max-height: 480px; }
+.dx-gene-table th { white-space: normal; vertical-align: bottom; line-height: 1.3; }
+.dx-gene-table td { vertical-align: middle; white-space: nowrap; }
+.dx-gene-table td.dx-gene { font-size: 12.5px; color: var(--text); }
+.dx-gene-actions { display: flex; justify-content: flex-end; gap: 4px; }
+.dx-gene-actions .btn.active { color: var(--accent-text); background: var(--accent-soft); }
+.dx-gene-table tr.dx-on-map td.dx-gene { box-shadow: inset 3px 0 0 var(--accent-text); }
+.dx-pct { display: flex; align-items: center; gap: 8px; min-width: 120px; }
+.dx-pct-track { position: relative; flex: 0 0 64px; height: 6px; border-radius: 3px; background: var(--surface-3); overflow: hidden; }
+.dx-pct-fill { position: absolute; left: 0; top: 0; bottom: 0; background: var(--accent-text); border-radius: 3px; }
+.dx-pct-text { font-size: 12.5px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
 
 /* ---------------------------------------------------------------- parameters tab */
 .pf-layout { display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 22px; align-items: start; }
@@ -341,4 +397,15 @@ button.vchip { cursor: pointer; }
   .sig-flags { grid-template-columns: minmax(0, 1fr); }
   .sig-ex-row, .panel-row { grid-template-columns: 120px minmax(0, 1fr) auto; }
   .project-head .actions { width: 100%; }
+}
+@media (max-width: 760px) {
+  /* the gene table fits: no count of bins (the share stays, its title gives the count), no bar */
+  .dx-jump { display: flex; }
+  .dx-gene-table .dx-col-bins, .dx-pct-track { display: none; }
+  .dx-pct { min-width: 0; }
+}
+@media (max-width: 480px) {
+  /* and on a phone: icon buttons (named by aria-label, explained by title) */
+  .dx-btn-text { display: none; }
+  .dx-gene-actions .btn { width: 28px; padding: 0; }
 }

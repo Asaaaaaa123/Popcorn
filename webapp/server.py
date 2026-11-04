@@ -8,13 +8,16 @@ The server process stays light and responsive: it never imports scanpy, anndata 
 a worker subprocess started by webapp.jobs). Package versions come from the installed package metadata, the data
 checks read the Space Ranger files directly (h5py for the feature-barcode matrix, pandas/pyarrow for the tissue
 positions, Pillow for the image size), and every JSON response is strict JSON: numpy values become plain numbers,
-NaN and infinities become null.
+NaN and infinities become null. The data explorer and the gene maps of the viewer read the raw counts the same way
+(h5py + scipy.sparse), exactly as bone_analysis.read_visium_hd loads them.
 """
 from __future__ import annotations
 
 import collections
 import contextlib
 import functools
+import hashlib
+import hmac
 import importlib
 import importlib.metadata
 import json
@@ -39,6 +42,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
+from scipy import sparse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 import pipeline_config as pc
@@ -100,6 +104,22 @@ BIN_CATEGORY_COLUMNS = ("tissue_class", "assigned_signature", "leiden_domain")
 BIN_MAX_CATEGORIES = 500
 REMOVED_COLOR = "#b8b8b8"
 UNASSIGNED_COLOR = "#dedede"
+
+# raw sections (data explorer, gene maps of the viewer)
+RAW_SECTIONS_CACHED = 8            # sections whose counts are held in memory at most, and their estimated size at
+RAW_SECTIONS_BUDGET = 1 << 30      # most (19,000 genes: about 100 MB for 105,000 16 um bins, 200 MB for 412,000 8 um)
+RAW_SECTION_MAX_BINS = 1_000_000   # bins of one section at most (002um sections have millions: the server stays light)
+EXPLORE_PAYLOADS_CACHED = 8        # encoded bins payloads of the explorer held at most, and their size at most
+EXPLORE_PAYLOADS_BUDGET = 128 << 20  # (about 5 MB at 16 um, 20 MB at 8 um)
+GENE_LIST_LIMIT = 50               # genes per gene list by default
+GENE_LIST_MAX = 500                # genes per gene list at most
+MAX_GENES_PER_MAP = 50             # genes summed into one gene map at most
+MAX_GENE_NAME = 200
+GENE_EXPRESSION = "Gene Expression"
+MT_PREFIX = "mt-"                  # mitochondrial genes, case-insensitive (bone_analysis.qc_metrics)
+BARCODE_SUFFIX_RE = re.compile(r"-\d+$")
+IMAGE_KEY_RE = re.compile(r"^[0-9a-f]{32}\Z")
+IMAGE_KEYS_MAX = 256
 
 # The Windows registry can map .js to text/plain (browsers then refuse to load the ES modules of the front end) and
 # .csv to Excel; serve the standard types whatever the registry says.
@@ -691,30 +711,74 @@ class Table:
 
 
 class LRUCache:
-    """Small thread-safe LRU mapping; values are built outside the lock."""
+    """Small thread-safe LRU mapping; values are built outside the lock, one build per key at a time (a request for a
+    key being built waits for that build and gets its value, or its error, instead of building it again; an error is
+    not kept, so a later request tries again). At most `size` values are kept and, with `weigh` (value -> bytes), at
+    most `budget` bytes of them; the newest value is kept whatever its weight."""
 
-    def __init__(self, size: int):
-        self.size = size
-        self._items: collections.OrderedDict = collections.OrderedDict()
+    def __init__(self, size: int, budget: int | None = None, weigh=None):
+        self.size, self.budget, self.weigh = size, budget, weigh
+        self._items: collections.OrderedDict = collections.OrderedDict()  # key -> (value, weight)
+        self._weight = 0
         self._lock = threading.Lock()
+        # key -> [lock held while building, number of requests using it, failed builds, the last build's error]
+        self._gates: dict = {}
 
-    def get(self, key, build):
+    def _cached(self, key):
         with self._lock:
             if key in self._items:
                 self._items.move_to_end(key)
-                return self._items[key]
-        value = build()
+                return True, self._items[key][0]
+        return False, None
+
+    def _store(self, key, value) -> None:
+        weight = int(self.weigh(value)) if self.weigh is not None else 0
         with self._lock:
-            self._items[key] = value
-            self._items.move_to_end(key)
-            while len(self._items) > self.size:
-                self._items.popitem(last=False)
-        return value
+            old = self._items.pop(key, None)
+            if old is not None:
+                self._weight -= old[1]
+            self._items[key] = (value, weight)
+            self._weight += weight
+            while len(self._items) > 1 and (len(self._items) > self.size
+                                            or (self.budget is not None and self._weight > self.budget)):
+                self._weight -= self._items.popitem(last=False)[1][1]
+
+    def get(self, key, build):
+        found, value = self._cached(key)
+        if found:
+            return value
+        with self._lock:
+            gate = self._gates.setdefault(key, [threading.Lock(), 0, 0, None])
+            gate[1] += 1
+            failures = gate[2]
+        try:
+            with gate[0]:
+                found, value = self._cached(key)
+                if found:
+                    return value
+                with self._lock:
+                    error = gate[3] if gate[2] != failures else None
+                if error is not None:  # the build this request waited for failed: the same answer, not another try
+                    raise error
+                try:
+                    value = build()
+                except Exception as exc:
+                    with self._lock:
+                        gate[2] += 1
+                        gate[3] = exc
+                    raise
+                self._store(key, value)
+                return value
+        finally:
+            with self._lock:
+                gate[1] -= 1
+                if gate[1] == 0:
+                    self._gates.pop(key, None)
 
     def discard(self, predicate) -> None:
         with self._lock:
             for key in [k for k in self._items if predicate(k)]:
-                del self._items[key]
+                self._weight -= self._items.pop(key)[1]
 
 
 def file_key(path: Path) -> tuple[str, int, int]:
@@ -762,13 +826,15 @@ def finite_list(values: np.ndarray, digits: int | None = None) -> list:
 
 
 class BinsTable:
-    """The per-bin table of one run, with the JSON of GET /bins encoded once per sample."""
+    """The per-bin table of one run, with the JSON of GET /bins encoded once per sample. `source` identifies the file
+    it was read from (cache keys of what is derived from it)."""
 
-    def __init__(self, df: pd.DataFrame, cfg: dict):
+    def __init__(self, df: pd.DataFrame, cfg: dict, source: tuple = ()):
         if "sample_id" not in df.columns:
             raise DataError("the per-bin table has no sample_id column")
         self.df = df
         self.cfg = cfg
+        self.source = source
         sample_ids = df["sample_id"].map(category_label)
         self.groups = dict(sample_ids.groupby(sample_ids, sort=False).indices)
         self.kinds: dict[str, str] = {}
@@ -852,6 +918,15 @@ class BinsTable:
             self._payloads[sid] = encoded
         return encoded
 
+    def barcodes(self, sid: str) -> list[str]:
+        """Barcodes of the bins of a sample, in the order of GET /bins."""
+        if sid not in self.groups:
+            raise NotFound(f"sample {sid!r} is not in the per-bin table")
+        if "barcode" not in self.df.columns:
+            raise DataError("the per-bin table has no barcode column")
+        values = self.df["barcode"].iloc[self.groups[sid]].tolist()
+        return ["" if v is None or (not isinstance(v, str) and pd.isna(v)) else str(v) for v in values]
+
 
 def per_bin_file(results: Path, cfg: dict) -> Path:
     try:
@@ -864,6 +939,390 @@ def per_bin_file(results: Path, cfg: dict) -> Path:
     if found:
         return found[0]
     raise NotFound("this run has no per-bin table (per_bin_signature_calls_*.csv.gz) yet")
+
+
+# ============================================================================
+# RAW SECTIONS (data explorer: POST /explore/...; gene maps of the viewer: /runs/{rid}/genes, /gene, /bins/image)
+# ============================================================================
+
+def decode_all(values) -> list[str]:
+    return [v.decode("utf-8", "replace") if isinstance(v, bytes) else str(v) for v in values]
+
+
+def norm_barcodes(values) -> pd.Series:
+    """bone_analysis._norm_bc of every barcode: surrounding blanks and the -<n> suffix removed."""
+    return pd.Series(list(values), dtype=object).astype(str).str.strip().str.replace(BARCODE_SUFFIX_RE, "",
+                                                                                      regex=True)
+
+
+def make_unique(values: list[str]) -> list[str]:
+    """anndata's make_index_unique (var_names_make_unique, obs_names_make_unique): the second and later copies of a
+    name become <name>-1, <name>-2, ..., skipping names already in use."""
+    seen, dups = set(), []
+    for i, v in enumerate(values):
+        if v in seen:
+            dups.append(i)
+        seen.add(v)
+    if not dups:
+        return list(values)
+    out, counter = list(values), collections.Counter()
+    for i in dups:
+        v = values[i]
+        while True:
+            counter[v] += 1
+            name = f"{v}-{counter[v]}"
+            if name not in seen:
+                seen.add(name)
+                out[i] = name
+                break
+    return out
+
+
+def too_many_bins(path: Path, n: int) -> DataError:
+    return DataError(f"{path} holds {n:,} bins; the explorer and the gene maps read at most "
+                     f"{RAW_SECTION_MAX_BINS:,} bins per section: choose a larger bin size, such as 008um or 016um")
+
+
+def read_counts(path: Path, max_bins: int | None = None) -> tuple[sparse.csr_matrix, list[str], list[str]]:
+    """(bins x genes counts, barcodes, gene names) of a feature-barcode matrix as scanpy.read_10x_h5 reads it: the
+    'Gene Expression' features only, explicit zeros removed. Names are not made unique yet. A matrix of more than
+    max_bins barcodes is refused (DataError) before its counts are read."""
+    try:
+        with h5py.File(path, "r") as f:
+            m = f["matrix"]
+            n_features, n_barcodes = (int(v) for v in m["shape"][()][:2])
+            if max_bins is not None and n_barcodes > max_bins:
+                raise too_many_bins(path, n_barcodes)
+            barcodes = decode_all(m["barcodes"][()])
+            features = m["features"]
+            names = decode_all(features["name"][()])
+            kinds = decode_all(features["feature_type"][()]) if "feature_type" in features else None
+            data, indices, indptr = m["data"][()], m["indices"][()], m["indptr"][()]
+        if data.dtype.kind not in "iu":
+            if data.dtype.kind != "f" or not np.array_equal(data, np.round(data)):
+                raise ValueError(f"the counts are not integers ({data.dtype})")
+            data = data.astype(np.int64)
+        X = sparse.csr_matrix((data, indices, indptr), shape=(n_barcodes, n_features))
+    except (OSError, KeyError, ValueError, IndexError, TypeError) as exc:
+        raise DataError(f"{path} is not a readable feature-barcode matrix ({exc})") from exc
+    if len(barcodes) != n_barcodes or len(names) != n_features:
+        raise DataError(f"{path}: the barcodes and features do not match the matrix shape")
+    if kinds is not None and any(k != GENE_EXPRESSION for k in kinds):
+        keep = np.array([k == GENE_EXPRESSION for k in kinds])
+        X = X[:, keep]
+        names = [n for n, k in zip(names, kinds) if k == GENE_EXPRESSION]
+    X.eliminate_zeros()
+    return X, barcodes, names
+
+
+def read_positions(path: Path) -> pd.DataFrame:
+    """Every row of a tissue positions file (in tissue or not): barcode (normalised like the matrix barcodes) and the
+    full-resolution pixel coordinates x = pxl_col_in_fullres, y = pxl_row_in_fullres (NaN when not a number)."""
+    try:
+        if path.suffix == ".parquet":
+            df = pd.read_parquet(path)
+        elif path.name == "tissue_positions_list.csv":  # Space Ranger 1.x: no header
+            df = pd.read_csv(path, header=None, names=POSITION_COLUMNS)
+        else:
+            df = pd.read_csv(path)
+        bc = "barcode" if "barcode" in df.columns else df.columns[0]
+        return pd.DataFrame({"barcode": norm_barcodes(df[bc]).to_numpy(object),
+                             "x": pd.to_numeric(df["pxl_col_in_fullres"], errors="coerce").to_numpy(float),
+                             "y": pd.to_numeric(df["pxl_row_in_fullres"], errors="coerce").to_numpy(float)})
+    except (OSError, KeyError, ValueError, IndexError, ImportError) as exc:
+        raise DataError(f"{path} is not a readable tissue positions table ({exc})") from exc
+
+
+def section_key(matrix: Path, positions: Path) -> tuple:
+    try:
+        return (*file_key(matrix), *file_key(positions))
+    except OSError as exc:
+        raise DataError(f"the section files cannot be read ({exc})") from exc
+
+
+class RawSection:
+    """The raw counts of one section as bone_analysis.read_visium_hd loads them: the barcodes of
+    filtered_feature_bc_matrix.h5 without their -<n> suffix (made unique), joined to the tissue positions by barcode,
+    bins without coordinates dropped, matrix order kept; the 'Gene Expression' features with their names made unique.
+    Per-bin totals as bone_analysis.qc_metrics computes them (mitochondrial genes: names starting with mt-, any case).
+    The counts are held by gene (CSC) for the gene maps. Sections of more than RAW_SECTION_MAX_BINS bins are refused."""
+
+    def __init__(self, matrix: Path, positions: Path):
+        self.key = section_key(matrix, positions)
+        self.matrix_path, self.positions_path = matrix, positions
+        X, barcodes, names = read_counts(matrix, RAW_SECTION_MAX_BINS)
+        barcodes = make_unique(norm_barcodes(barcodes).tolist())
+        tp = read_positions(positions)
+        tp = tp[tp["barcode"].isin(barcodes)].drop_duplicates("barcode").set_index("barcode").reindex(barcodes)
+        ok = (tp["x"].notna() & tp["y"].notna()).to_numpy()
+        self.n_barcodes = len(barcodes)
+        if self.n_barcodes and ok.mean() < 0.5:  # the same check as bone_analysis.read_visium_hd
+            raise DataError(f"only {int(ok.sum()):,} of {self.n_barcodes:,} barcodes of {matrix} have a position in "
+                            f"{positions}; are both files from the same run and bin size?")
+        rows = np.flatnonzero(ok)
+        self.barcodes = [barcodes[i] for i in rows.tolist()]
+        self.index = pd.Index(self.barcodes)
+        self.x_px = tp["x"].to_numpy(float)[rows]
+        self.y_px = tp["y"].to_numpy(float)[rows]
+        X = X[rows] if len(rows) < X.shape[0] else X
+        self.n_bins = X.shape[0]
+        self.genes = make_unique(names)
+        self.total = np.asarray(X.sum(axis=1, dtype=np.int64)).ravel()
+        self.n_genes = np.diff(X.indptr).astype(np.int64)
+        mt = np.array([g.lower().startswith(MT_PREFIX) for g in self.genes], dtype=bool)
+        self.mt = (np.asarray(X[:, mt].sum(axis=1, dtype=np.int64)).ravel() if mt.any()
+                   else np.zeros(self.n_bins, np.int64))
+        X = X.tocsc()
+        if X.nnz and X.data.min() >= 0 and X.data.max() <= np.iinfo(np.uint16).max:
+            X.data = X.data.astype(np.uint16)  # half the memory of the int32 counts; sums are taken in int64
+        self.X = X
+        self.gene_total = np.asarray(X.sum(axis=0, dtype=np.int64)).ravel()
+        self.gene_bins = np.diff(X.indptr).astype(np.int64)
+        self.folded = [g.casefold() for g in self.genes]
+        self._exact = {g: i for i, g in enumerate(self.genes)}
+        self._by_folded: dict[str, int] = {}
+        for i, g in enumerate(self.folded):
+            self._by_folded.setdefault(g, i)
+        # estimated memory (the section cache's budget): the counts, the per-bin and per-gene arrays, and about 300
+        # bytes per barcode (string and index) and per gene name (three strings and two dictionary entries)
+        arrays = (X.data, X.indices, X.indptr, self.x_px, self.y_px, self.total, self.n_genes, self.mt,
+                  self.gene_total, self.gene_bins)
+        self.nbytes = sum(a.nbytes for a in arrays) + 300 * (self.n_bins + len(self.genes))
+
+    def resolve(self, names: list[str]) -> tuple[list[str], list[str], list[int]]:
+        """(genes used, names not found, their columns): an exact name, else the first gene of that name in any case;
+        each gene counted once."""
+        used, missing, cols = [], [], []
+        for name in names:
+            col = self._exact.get(name)
+            if col is None:
+                col = self._by_folded.get(name.casefold())
+            if col is None:
+                missing.append(name)
+            elif col not in cols:
+                cols.append(col)
+                used.append(self.genes[col])
+        return used, missing, cols
+
+    def counts(self, cols: list[int]) -> np.ndarray:
+        """Per-bin sum of the counts of the given genes (int64, section order)."""
+        if not cols:
+            return np.zeros(self.n_bins, np.int64)
+        return np.asarray(self.X[:, cols].sum(axis=1, dtype=np.int64)).ravel()
+
+    def gene_stats(self, rows: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """(total UMI, number of bins detecting it) of every gene over the given rows (a row listed twice counts
+        twice)."""
+        weights = np.bincount(rows, minlength=self.n_bins).astype(np.int64)
+        genes = np.repeat(np.arange(len(self.genes)), np.diff(self.X.indptr))
+        w = weights[self.X.indices]
+        total = np.bincount(genes, weights=self.X.data * w, minlength=len(self.genes))
+        detected = np.bincount(genes, weights=w, minlength=len(self.genes))
+        return np.rint(total).astype(np.int64), np.rint(detected).astype(np.int64)
+
+    def rows_of(self, barcodes: list[str], sid: str) -> np.ndarray:
+        """Row of each barcode of a per-bin table (-1 when it has none). The analysis joins the sections with
+        anndata.concat(index_unique="-"), so a per-bin barcode is <normalised matrix barcode>-<sample id>; a barcode
+        without that suffix is looked up as it is, then normalised like the matrix barcodes."""
+        suffix = f"-{sid}"
+        rows = self.index.get_indexer([b[:-len(suffix)] if b.endswith(suffix) else b for b in barcodes])
+        for attempt in (lambda bs: bs, lambda bs: norm_barcodes(bs).tolist()):
+            missing = np.flatnonzero(rows < 0)
+            if not len(missing):
+                break
+            rows[missing] = self.index.get_indexer(attempt([barcodes[i] for i in missing.tolist()]))
+        return rows
+
+
+class RunGeneLink:
+    """The bins of one sample of a run (GET /bins order) matched by barcode to the rows of its raw section. It keeps
+    no reference to the section, so that the section cache alone bounds the memory."""
+
+    def __init__(self, section: RawSection, barcodes: list[str], sid: str):
+        self.rows = section.rows_of(barcodes, sid)
+        self.n = len(self.rows)
+        self.n_unmatched = int((self.rows < 0).sum())
+        self._stats: tuple[np.ndarray, np.ndarray] | None = None
+        self._lock = threading.Lock()
+
+    def counts(self, section: RawSection, cols: list[int]) -> np.ndarray:
+        values = np.zeros(self.n, np.int64)
+        ok = self.rows >= 0
+        values[ok] = section.counts(cols)[self.rows[ok]]
+        return values
+
+    def gene_stats(self, section: RawSection) -> tuple[np.ndarray, np.ndarray]:
+        with self._lock:
+            if self._stats is None:
+                self._stats = section.gene_stats(self.rows[self.rows >= 0])
+            return self._stats
+
+
+class ImageKeys:
+    """Opaque keys of the H&E images the maps may show (GET /api/explore-images/{key}). A key is issued only for an
+    image the server resolved itself, never for a path a client sent; it stays the same while the file is unchanged
+    (so a cached map keeps a valid address: every request that returns it issues it again)."""
+
+    def __init__(self, size: int = IMAGE_KEYS_MAX):
+        self.size = size
+        self._secret = secrets.token_bytes(16)
+        self._paths: collections.OrderedDict[str, Path] = collections.OrderedDict()
+        self._lock = threading.Lock()
+
+    def issue(self, path: Path) -> str:
+        key = hmac.new(self._secret, repr(file_key(path)).encode("utf-8"), hashlib.sha256).hexdigest()[:32]
+        with self._lock:
+            self._paths[key] = path
+            self._paths.move_to_end(key)
+            while len(self._paths) > self.size:
+                self._paths.popitem(last=False)
+        return key
+
+    def path(self, key: str) -> Path | None:
+        with self._lock:
+            return self._paths.get(key)
+
+
+def section_files(cfg: dict, sample: dict) -> tuple[Path, Path]:
+    """(filtered_feature_bc_matrix.h5, tissue positions file) of a sample at the analysis bin size; NotFound when
+    either is missing."""
+    sid = sample["id"]
+    bin_dir = pc.resolve_bin_dir(cfg, sample)
+    if bin_dir is None:
+        raise NotFound(f"sample {sid}: no square_{cfg.get('bin_size')}/filtered_feature_bc_matrix.h5 in "
+                       f"{sample_base(cfg, sample)}")
+    positions = positions_file(bin_dir / "spatial")
+    if positions is None:
+        raise NotFound(f"sample {sid}: no tissue positions file in {bin_dir / 'spatial'}")
+    return bin_dir / "filtered_feature_bc_matrix.h5", positions
+
+
+def section_mpp(sample: dict, spatial: Path) -> float:
+    """Microns per full-resolution pixel of a section, as the analysis takes it (the configured value, else
+    scalefactors_json.json of the bin size)."""
+    mpp = microns_per_pixel(sample, read_scalefactors(spatial))
+    if mpp is None:
+        raise DataError(f"sample {sample['id']}: microns_per_pixel is not set and "
+                        f"{spatial / 'scalefactors_json.json'} does not record it; set it in the sample's settings")
+    return mpp
+
+
+def section_image(cfg: dict, sample: dict, mpp: float, keys: ImageKeys) -> tuple[dict | None, str | None]:
+    """({"url", "px_per_um", "width", "height"} of the hires H&E image, None) or (None, why there is none).
+    px_per_um = tissue_hires_scalef / microns per pixel: image pixels per micrometre of the bin coordinates."""
+    image = hires_image(cfg, sample)
+    if image is None:
+        return None, "no H&E image (spatial/tissue_hires_image.png)"
+    try:
+        scalefactors = read_scalefactors(image.parent) or {}
+    except DataError as exc:
+        return None, str(exc)
+    scalef = positive_number(scalefactors.get("tissue_hires_scalef"))
+    if scalef is None:
+        return None, (f"no tissue_hires_scalef in {image.parent / 'scalefactors_json.json'}; the H&E image cannot be "
+                      f"placed")
+    try:
+        with Image.open(image) as im:
+            width, height = im.size
+        key = keys.issue(image)
+    except (OSError, ValueError, Image.DecompressionBombError) as exc:
+        return None, f"{image} cannot be read as an image ({exc})"
+    return {"url": f"/api/explore-images/{key}", "px_per_um": scalef / mpp, "width": width, "height": height}, None
+
+
+def qc_thresholds(cfg: dict) -> tuple[dict, list[str]]:
+    """The qc thresholds of a (draft) configuration, a default for any that is not a number: (thresholds, notes)."""
+    qc = cfg.get("qc") if isinstance(cfg.get("qc"), dict) else {}
+    defaults = pc.default_config()["qc"]
+    out, notes = {}, []
+    for key in ("min_genes", "min_counts", "max_pct_mt"):
+        value = qc.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            value = defaults[key]
+            notes.append(f"qc.{key} is not a number; the default {value} is used")
+        out[key] = value
+    return out, notes
+
+
+def explore_payload(section: RawSection, sid: str, bin_size: str, mpp: float, qc: dict, image: dict | None,
+                    notes: list[str]) -> bytes:
+    """JSON of POST /explore/{sid}/bins: the bin payload of GET /runs/{rid}/bins (same shape) for the raw section."""
+    total = section.total
+    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+        # float32 like scanpy's calculate_qc_metrics, so that passes_qc is the analysis' decision to the last bin
+        # (Python-float thresholds: compared in float32 as pandas does there, and no overflow for a huge draft value)
+        pct_mt = (section.mt.astype(np.float32) / total.astype(np.float32)) * np.float32(100)
+        passes = ((section.n_genes > float(qc["min_genes"])) & (total.astype(np.float32) > float(qc["min_counts"]))
+                  & (pct_mt < float(qc["max_pct_mt"])))
+    n = section.n_bins
+    finite_pct = pct_mt[np.isfinite(pct_mt)]
+    n_pass = int(passes.sum())
+    summary = {
+        "n_bins": n, "n_barcodes": section.n_barcodes, "n_without_position": section.n_barcodes - n,
+        "n_features": len(section.genes), "total_umi": int(total.sum()),
+        "median_umi": float(np.median(total)) if n else None, "mean_umi": round(float(total.mean()), 2) if n else None,
+        "median_genes": float(np.median(section.n_genes)) if n else None,
+        "median_pct_mt": round(float(np.median(finite_pct)), 3) if len(finite_pct) else None,
+        "n_pass_qc": n_pass, "pct_pass_qc": round(100.0 * n_pass / n, 2) if n else None, "bin_size": bin_size,
+        "microns_per_pixel": mpp, "qc": qc, "matrix": str(section.matrix_path),
+        "positions": str(section.positions_path),
+    }
+    body = {
+        "sample": sid, "n": n, "x": finite_list(section.x_px * mpp, 2), "y": finite_list(section.y_px * mpp, 2),
+        "fields": {"total_umi": {"type": "number", "values": total.tolist()},
+                   "n_genes": {"type": "number", "values": section.n_genes.tolist()},
+                   "pct_mt": {"type": "number", "values": finite_list(pct_mt.astype(np.float64), 2)},
+                   "passes_qc": {"type": "bool", "values": passes.astype(np.int8).tolist()}},
+        "colors": {}, "barcodes": section.barcodes, "summary": json_safe(summary), "image": json_safe(image),
+        "notes": notes,
+    }
+    return json.dumps(body, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
+
+
+def gene_table(section: RawSection, total: np.ndarray, detected: np.ndarray, n_bins: int, query: str,
+               limit: int) -> dict:
+    """Genes by total UMI (descending, then panel order) whose name contains `query` (any case), at most `limit`."""
+    order = np.lexsort((np.arange(len(total)), -total)).tolist()
+    if query:
+        q = query.casefold()
+        order = [i for i in order if q in section.folded[i]]
+    genes = [{"gene": section.genes[i], "total_umi": int(total[i]), "n_bins_detected": int(detected[i]),
+              "pct_bins_detected": round(100.0 * int(detected[i]) / n_bins, 2) if n_bins else None}
+             for i in order[:limit]]
+    return {"n_bins": n_bins, "n_features": len(section.genes), "n_matches": len(order), "genes": genes}
+
+
+def sparse_vector(values: np.ndarray, used: list[str], missing: list[str]) -> dict:
+    """A gene map: per-bin counts as the positions and values of the bins with a count above zero."""
+    idx = np.flatnonzero(values > 0)
+    return {"genes_used": used, "genes_missing": missing, "n": int(len(values)), "indices": idx.tolist(),
+            "values": values[idx].tolist(), "total": int(values.sum()), "n_detected": int(len(idx)),
+            "max": int(values.max()) if len(values) else 0}
+
+
+def requested_genes(value) -> list[str]:
+    if not isinstance(value, list) or not value:
+        raise HTTPException(400, "genes must be a non-empty list of gene names")
+    if len(value) > MAX_GENES_PER_MAP:
+        raise HTTPException(400, f"at most {MAX_GENES_PER_MAP} genes can be summed into one map")
+    names = []
+    for v in value:
+        if not isinstance(v, str) or not v.strip() or len(v.strip()) > MAX_GENE_NAME:
+            raise HTTPException(400, f"every gene must be a name of 1 to {MAX_GENE_NAME} characters")
+        names.append(v.strip())
+    return list(dict.fromkeys(names))
+
+
+def gene_query(query, limit) -> tuple[str, int]:
+    if query is None:
+        query = ""
+    if not isinstance(query, str) or len(query) > MAX_GENE_NAME:
+        raise HTTPException(400, f"query must be a text of at most {MAX_GENE_NAME} characters")
+    if limit is None:
+        limit = GENE_LIST_LIMIT
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= GENE_LIST_MAX:
+        raise HTTPException(400, f"limit must be an integer from 1 to {GENE_LIST_MAX}")
+    return query.strip(), limit
 
 
 # ============================================================================
@@ -1082,6 +1541,11 @@ def create_app(workspace: Path, token: str | None = None, worker_module: str = "
     jobs = JobManager(storage.root, worker_module=worker_module, storage=storage)
     tables = LRUCache(6)
     bins_cache = LRUCache(4)
+    # RawSection by matrix + positions file (path, mtime, size), bounded by their estimated memory
+    sections = LRUCache(RAW_SECTIONS_CACHED, RAW_SECTIONS_BUDGET, lambda s: s.nbytes)
+    explore_cache = LRUCache(EXPLORE_PAYLOADS_CACHED, EXPLORE_PAYLOADS_BUDGET, len)  # JSON of POST /explore/../bins
+    gene_links = LRUCache(8)                   # RunGeneLink by run, sample, per-bin table and section
+    image_keys = ImageKeys()
     demo_lock = threading.Lock()
 
     @contextlib.asynccontextmanager
@@ -1242,6 +1706,54 @@ def create_app(workspace: Path, token: str | None = None, worker_module: str = "
         prefix = str(storage.runs_dir / rid) + os.sep
         tables.discard(lambda key: key[0].startswith(prefix))
         bins_cache.discard(lambda key: key[0] == rid)
+        gene_links.discard(lambda key: key[0] == rid)
+
+    def raw_section(matrix: Path, positions: Path) -> RawSection:
+        return sections.get(section_key(matrix, positions), lambda: RawSection(matrix, positions))
+
+    def explore_config(pid: str, body: dict) -> dict:
+        """Configuration of the data explorer: the unsaved edits sent with the request (body.config, as for POST
+        /validate) or else the saved one, merged with the defaults, data_root made absolute."""
+        project = storage.get_project(pid)
+        given = optional_object(body, "config")
+        cfg = anchored(pc.merge_with_defaults(given if given is not None else project.get("config") or {}))
+        try:
+            pc.bin_um(cfg.get("bin_size"))
+        except ValueError:
+            raise HTTPException(400, f"bin_size must look like '016um', got {cfg.get('bin_size')!r}") from None
+        return cfg
+
+    def explore_sample(pid: str, sid: str, body: dict) -> tuple[dict, dict]:
+        cfg = explore_config(pid, body)
+        for s in config_samples(cfg):
+            if s["id"] == sid:
+                return cfg, s
+        raise NotFound(f"sample {sid!r} is not in the configuration of project {pid}")
+
+    def run_sample(rid: str, sid: str) -> tuple[dict, dict]:
+        """(configuration of the run with an absolute data_root, sample entry)."""
+        require_run(rid)
+        cfg = anchored(run_config(rid))
+        for s in config_samples(cfg):
+            if s["id"] == sid:
+                return cfg, s
+        raise NotFound(f"sample {sid!r} is not in run {rid}")
+
+    def run_gene_link(rid: str, sid: str) -> tuple[RunGeneLink, RawSection]:
+        """The bins of a sample of a run matched to its raw section, read again from the run's data_root."""
+        table = bins_table(rid)
+        if sid not in table.groups:
+            raise NotFound(f"sample {sid!r} is not in the per-bin table of run {rid}")
+        cfg, sample = run_sample(rid, sid)
+        try:
+            matrix, positions = section_files(cfg, sample)
+        except NotFound as exc:
+            raise DataError(f"the raw data of run {rid} can no longer be found ({exc}); gene maps need the Space "
+                            f"Ranger outputs the run analysed") from None
+        section = raw_section(matrix, positions)
+        link = gene_links.get((rid, sid, *table.source, *section.key),
+                              lambda: RunGeneLink(section, table.barcodes(sid), sid))
+        return link, section
 
     # ---- front end ---------------------------------------------------------------------------------------------
     app.mount("/static", NoCacheStaticFiles(directory=STATIC_DIR), name="static")
@@ -1426,6 +1938,66 @@ def create_app(workspace: Path, token: str | None = None, worker_module: str = "
             keep = np.unique(np.linspace(0, n - 1, PREVIEW_MAX_BINS).round().astype(np.int64))
             x, y = x[keep], y[keep]
         return JSONOut({"x": finite_list(x * scalef, 1), "y": finite_list(y * scalef, 1), "n_total": n})
+
+    # ---- data explorer (raw sections; unsaved settings like POST /validate) ----------------------------------------
+    @app.post("/api/projects/{pid}/explore/samples")
+    def explore_samples(pid: str, body: dict = Depends(optional_json_body)):
+        cfg = explore_config(pid, body)
+        out = []
+        for sample in config_samples(cfg):
+            entry = {"id": sample["id"], "label": sample.get("label") or sample["id"],
+                     "condition": sample.get("condition"), "color": sample.get("color"), "n_bins": None,
+                     "has_image": hires_image(cfg, sample) is not None, "ok": False, "message": ""}
+            try:
+                matrix, positions = section_files(cfg, sample)
+                entry["n_bins"] = len(in_tissue_xy(positions)[0])  # positions only: the matrix is not read
+                if entry["n_bins"] > RAW_SECTION_MAX_BINS:
+                    raise too_many_bins(matrix, entry["n_bins"])
+            except (NotFound, DataError) as exc:
+                entry["message"] = str(exc)
+            else:
+                entry["ok"] = True
+                entry["message"] = f"{entry['n_bins']:,} bins at {cfg['bin_size']}"
+            out.append(entry)
+        return JSONOut({"bin_size": cfg["bin_size"], "samples": out})
+
+    @app.post("/api/projects/{pid}/explore/{sid}/bins")
+    def explore_bins(pid: str, sid: str, body: dict = Depends(optional_json_body)):
+        cfg, sample = explore_sample(pid, sid, body)
+        matrix, positions = section_files(cfg, sample)
+        mpp = section_mpp(sample, matrix.parent / "spatial")
+        image, image_note = section_image(cfg, sample, mpp, image_keys)  # issues the image key on every request
+        qc, notes = qc_thresholds(cfg)
+        notes += [image_note] if image_note else []
+        key = (sid, cfg["bin_size"], *section_key(matrix, positions), mpp, tuple(qc.items()), json.dumps(image),
+               tuple(notes))
+
+        def build() -> bytes:
+            return explore_payload(raw_section(matrix, positions), sid, cfg["bin_size"], mpp, qc, image, notes)
+
+        return Response(explore_cache.get(key, build), media_type=JSON_MEDIA_TYPE)
+
+    @app.post("/api/projects/{pid}/explore/{sid}/genes")
+    def explore_genes(pid: str, sid: str, body: dict = Depends(optional_json_body)):
+        query, limit = gene_query(body.get("query"), body.get("limit"))
+        cfg, sample = explore_sample(pid, sid, body)
+        section = raw_section(*section_files(cfg, sample))
+        return JSONOut(gene_table(section, section.gene_total, section.gene_bins, section.n_bins, query, limit))
+
+    @app.post("/api/projects/{pid}/explore/{sid}/gene")
+    def explore_gene(pid: str, sid: str, body: dict = Depends(json_body)):
+        names = requested_genes(body.get("genes"))
+        cfg, sample = explore_sample(pid, sid, body)
+        section = raw_section(*section_files(cfg, sample))
+        used, missing, cols = section.resolve(names)
+        return JSONOut(sparse_vector(section.counts(cols), used, missing))
+
+    @app.get("/api/explore-images/{key}")
+    def explore_image(key: str):
+        path = image_keys.path(key) if IMAGE_KEY_RE.match(key) else None
+        if path is None or not path.is_file():
+            raise NotFound("unknown image; load the map again")
+        return FileResponse(path, media_type="image/png", headers={"Cache-Control": "no-cache"})
 
     # ---- regions of interest -----------------------------------------------------------------------------------
     @app.get("/api/projects/{pid}/roi/{sid}")
@@ -1635,7 +2207,7 @@ def create_app(workspace: Path, token: str | None = None, worker_module: str = "
                 df = pd.read_csv(path, low_memory=False)
             except (OSError, ValueError) as exc:
                 raise DataError(f"{path.name} cannot be read ({exc})") from exc
-            return BinsTable(df, cfg)
+            return BinsTable(df, cfg, source=file_key(path))
 
         return bins_cache.get((rid, *file_key(path)), build)
 
@@ -1646,6 +2218,40 @@ def create_app(workspace: Path, token: str | None = None, worker_module: str = "
     @app.get("/api/runs/{rid}/bins")
     def bins(rid: str, sample: str):
         return Response(bins_table(rid).payload(sample), media_type=JSON_MEDIA_TYPE)
+
+    @app.get("/api/runs/{rid}/bins/image")
+    def run_bins_image(rid: str, sample: str):
+        cfg, entry = run_sample(rid, sample)
+        image = hires_image(cfg, entry)
+        if image is None:
+            raise NotFound(f"sample {sample} of run {rid} has no H&E image (spatial/tissue_hires_image.png)")
+        bin_dir = pc.resolve_bin_dir(cfg, entry)
+        try:  # the microns per pixel of the per-bin table's x_um, y_um
+            mpp = section_mpp(entry, bin_dir / "spatial" if bin_dir is not None else image.parent)
+        except DataError as exc:
+            raise NotFound(str(exc)) from None
+        info, note = section_image(cfg, entry, mpp, image_keys)
+        if info is None:
+            raise NotFound(f"sample {sample} of run {rid}: {note}")
+        return JSONOut(info)
+
+    @app.get("/api/runs/{rid}/genes")
+    def run_genes(rid: str, sample: str, query: str = "", limit: int = GENE_LIST_LIMIT):
+        query, limit = gene_query(query, limit)
+        link, section = run_gene_link(rid, sample)
+        total, detected = link.gene_stats(section)
+        return JSONOut({**gene_table(section, total, detected, link.n, query, limit),
+                        "n_unmatched": link.n_unmatched})
+
+    @app.post("/api/runs/{rid}/gene")
+    def run_gene(rid: str, body: dict = Depends(json_body)):
+        sid = body.get("sample")
+        if not isinstance(sid, str) or not sid:
+            raise HTTPException(400, "sample must be the id of a sample of the run")
+        names = requested_genes(body.get("genes"))
+        link, section = run_gene_link(rid, sid)
+        used, missing, cols = section.resolve(names)
+        return JSONOut({**sparse_vector(link.counts(section, cols), used, missing), "n_unmatched": link.n_unmatched})
 
     # ---- demo --------------------------------------------------------------------------------------------------
     @app.post("/api/demo")

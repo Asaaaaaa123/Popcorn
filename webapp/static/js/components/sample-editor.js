@@ -121,8 +121,9 @@ function moveMaskKey(cfg, from, to) {
 /**
  * Editable table of cfg.samples. Edits change `cfg` in place and call onChange(); add, remove and reorder rebuild
  * the rows. setReport(report) colors the rows with a data-check report; render() rebuilds after outside changes.
+ * onExplore(sampleId), when given, adds an Explore button to every section the report found.
  */
-export function sampleEditor({ cfg, report = null, onChange } = {}) {
+export function sampleEditor({ cfg, report = null, onChange, onExplore } = {}) {
   const uid = `smp-${++editorSeq}`;
   let currentReport = report;
   let refs = [];
@@ -166,9 +167,17 @@ export function sampleEditor({ cfg, report = null, onChange } = {}) {
       return;
     }
     const found = !!rep.bin_dir;
-    mount(r.status, h('span', { class: `state ${found ? 'ok' : 'bad'}`, title: rep.message || (found ? rep.bin_dir : 'Not found') },
-      icon(found ? 'check' : 'alert', { size: 13 }),
-      found ? (rep.n_bins !== null && rep.n_bins !== undefined ? `${fmt.int(rep.n_bins)} bins` : 'Found') : 'Not found'));
+    let explore = null;
+    if (found && onExplore) {
+      explore = button({ label: 'Explore', icon: 'eye', small: true, kind: 'ghost', onClick: () => onExplore(r.s.id) });
+      explore.title = 'Look at the data of this section: summary, maps of UMIs, quality control and any gene, gene list';
+      explore.setAttribute('aria-label', `Explore the data of section ${r.s.id}`);
+    }
+    mount(r.status, h('div', { class: 'sample-status-row' },
+      h('span', { class: `state ${found ? 'ok' : 'bad'}`, title: rep.message || (found ? rep.bin_dir : 'Not found') },
+        icon(found ? 'check' : 'alert', { size: 13 }),
+        found ? (rep.n_bins !== null && rep.n_bins !== undefined ? `${fmt.int(rep.n_bins)} bins` : 'Found') : 'Not found'),
+      explore));
   }
 
   async function browse(s, pathInput) {
@@ -400,8 +409,9 @@ function listBanner(kind, title, items) {
 /**
  * The data-check report: errors and warnings, one row per sample (found, folder, bin sizes, bins, microns per pixel,
  * H&E image) and gene coverage (signatures with genes missing from the probe set, receptor panel, adipocyte genes).
+ * onExplore(), when given, adds a pointer to the Explore tab once a section was found.
  */
-export function reportPanel({ report, cfg, checking = false, stale = false, error = null, checkedAt = null } = {}) {
+export function reportPanel({ report, cfg, checking = false, stale = false, error = null, checkedAt = null, onExplore } = {}) {
   const status = checking
     ? h('div', { class: 'report-status' }, h('span', { class: 'spinner' }), 'Checking the data…')
     : h('div', { class: 'report-status' },
@@ -411,6 +421,13 @@ export function reportPanel({ report, cfg, checking = false, stale = false, erro
   const parts = [status];
   if (error) parts.push(banner('danger', `The data check failed: ${error.message || error}`));
   if (!report) return h('div', { class: 'report' }, parts);
+
+  if (onExplore && (report.samples || []).some((s) => s.bin_dir)) {
+    parts.push(h('div', { class: 'report-explore' }, icon('eye', { size: 16 }),
+      h('span', null, h('strong', null, 'Read the data before any run. '),
+        'The Explore tab shows each section: bins, genes, UMIs and quality control, maps of them and of any gene on the H&E image, and the genes ranked by UMIs.'),
+      button({ label: 'Explore the data', icon: 'eye', small: true, onClick: () => onExplore() })));
+  }
 
   const errors = report.errors || [];
   const warnings = report.warnings || [];

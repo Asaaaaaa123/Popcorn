@@ -1,6 +1,6 @@
 // project.js — the project editor. A working copy (draft) per project id lives in this module, so switching tabs or
-// leaving and coming back never loses edits; Save writes it (PUT), Discard drops it. Tabs: data | parameters |
-// signatures | roi | run.
+// leaving and coming back never loses edits; Save writes it (PUT), Discard drops it. Tabs: data | explore |
+// parameters | signatures | roi | run.
 import {
   h, api, mount, icon, button, card, field, tabs, switchToggle, loading, emptyState, errorPanel, banner, toast,
   confirmDialog, fmt, clone, navigate, setPathSilently, resolveRoute, statusBadge, poll, state,
@@ -10,9 +10,11 @@ import { sampleEditor, chooseDetectedSamples, applyDetectedSamples, reportPanel,
 import { paramForm } from '../components/param-form.js';
 import { signatureEditor, geneCoverage } from '../components/signature-editor.js';
 import { roiEditor } from '../components/roi-editor.js';
+import { dataExplorer, exploreState } from '../components/data-explorer.js';
 
 const TABS = [
   { id: 'data', label: 'Data', icon: 'folder' },
+  { id: 'explore', label: 'Explore', icon: 'eye' },
   { id: 'parameters', label: 'Parameters', icon: 'sliders' },
   { id: 'signatures', label: 'Signatures', icon: 'dna' },
   { id: 'roi', label: 'Region of interest', icon: 'polygon' },
@@ -66,7 +68,8 @@ function adopt(d, project) {
 function newDraft(project) {
   const d = {
     id: project.id, rois: new Set(), report: null, reportKey: null, reportAt: null, reportError: null, checking: false,
-    saving: false, ui: { signature: null, runLabel: '', runSteps: {}, runDeterministic: null }, roi: {},
+    saving: false, ui: { signature: null, runLabel: '', runSteps: {}, runDeterministic: null, exploreFocus: null }, roi: {},
+    explore: null,
   };
   adopt(d, project);
   return d;
@@ -113,6 +116,12 @@ function getDefaults() {
 function dataKey(cfg) {
   return JSON.stringify([cfg.data_root, (Array.isArray(cfg.samples) ? cfg.samples : []).map((s) => [s.id, s.path, s.microns_per_pixel]),
     cfg.bin_size, cfg.qc_bin_size]);
+}
+
+/** What the Explore tab reads depends on: the data settings and the quality-control thresholds (bins passing QC). */
+function exploreKey(cfg) {
+  const qc = cfg.qc && typeof cfg.qc === 'object' ? cfg.qc : {};
+  return JSON.stringify([dataKey(cfg), qc.min_genes, qc.min_counts, qc.max_pct_mt]);
 }
 
 // ------------------------------------------------------------------------------------------------ view
@@ -500,7 +509,7 @@ function projectView(container, d, defaults, initialTab) {
       try { tabApi.destroy(); } catch (e) { console.error(e); }
     }
     tabApi = {};
-    const renderers = { data: dataTab, parameters: parametersTab, signatures: signaturesTab, roi: roiTab, run: runTab };
+    const renderers = { data: dataTab, explore: exploreTab, parameters: parametersTab, signatures: signaturesTab, roi: roiTab, run: runTab };
     try {
       tabApi = renderers[current](body) || {};
       if (tabApi.start) tabApi.start();
@@ -538,7 +547,7 @@ function projectView(container, d, defaults, initialTab) {
     const qcSel = h('select', { class: 'select', id: qcId });
     binSel.addEventListener('change', () => { cfg.bin_size = binSel.value; changed({ data: true }); });
     qcSel.addEventListener('change', () => { cfg.qc_bin_size = qcSel.value; changed({ data: true }); });
-    const editor = sampleEditor({ cfg, report: d.report, onChange: () => changed({ data: true }) });
+    const editor = sampleEditor({ cfg, report: d.report, onChange: () => changed({ data: true }), onExplore: openExplore });
     const reportBox = h('div');
     const recheck = button({ label: 'Check again', icon: 'refresh', small: true, onClick: () => { validateNow(true); } });
 
@@ -562,7 +571,10 @@ function projectView(container, d, defaults, initialTab) {
     }
 
     function paintReport() {
-      mount(reportBox, reportPanel({ report: d.report, cfg, checking: d.checking, stale: reportStale(), error: d.reportError, checkedAt: d.reportAt }));
+      mount(reportBox, reportPanel({
+        report: d.report, cfg, checking: d.checking, stale: reportStale(), error: d.reportError, checkedAt: d.reportAt,
+        onExplore: () => openExplore(null),
+      }));
       recheck.disabled = d.checking;
       fillBins();
       editor.setReport(d.report);
@@ -605,6 +617,26 @@ function projectView(container, d, defaults, initialTab) {
     paintReport();
     const tabHandle = { onReport: paintReport, start: () => { if (!d.checking) validateNow(false); } };
     return tabHandle;
+  }
+
+  // ---- Explore
+  /** Open the Explore tab, on section `sid` when given (the Data tab's Explore actions). */
+  function openExplore(sid) {
+    d.ui.exploreFocus = sid || null;
+    switchTab('explore');
+  }
+
+  function exploreTab(host) {
+    // the results stay while the data settings and QC thresholds stay the same; otherwise they are read again
+    d.explore = exploreState(d.config, exploreKey(d.config), d.explore);
+    const focus = d.ui.exploreFocus;
+    d.ui.exploreFocus = null;
+    const explorer = dataExplorer({
+      projectId: d.id, name: d.name.trim() || d.id, state: d.explore, getConfig: () => d.config, focus,
+      onOpenData: () => switchTab('data'),
+    });
+    mount(host, explorer.el);
+    return { destroy: explorer.destroy };
   }
 
   // ---- Parameters
