@@ -234,6 +234,176 @@ export function button({ label = '', icon: iconName, kind = '', small = false, o
   return b;
 }
 
+// ------------------------------------------------------------------------------------------------ menus
+// A button that opens a small list of actions (role="menu"), for secondary and destructive actions that would
+// otherwise each be a button on the page. One menu is open at a time; it follows its button when the page scrolls and
+// closes on a choice, Escape, Tab, a click elsewhere, resizing or navigation, returning the focus to its button. It
+// also closes when its button leaves the page (a repaint of the row that holds it).
+let openMenu = null;
+
+// The press that closes a menu (a click outside it) only closes it when it lands on a row or card that opens something
+// on a click: the click that follows does not also open the run, project or figure under the pointer. The links and
+// buttons of the row keep their clicks.
+const CLICKABLE_ROW = '.clickable, .dx-click, .fg-card';
+function swallowRowClick(target) {
+  const row = target instanceof Element ? target.closest(CLICKABLE_ROW) : null;
+  if (!row || target.closest('a, button, input, select, textarea, label, summary')) return;
+  let timer = 0;
+  const done = () => {
+    clearTimeout(timer);
+    window.removeEventListener('click', onClick, true);
+    window.removeEventListener('pointerdown', done, true);
+  };
+  const onClick = (e) => {
+    if (e.target instanceof Node && row.contains(e.target)) e.stopPropagation();
+    done();
+  };
+  window.addEventListener('click', onClick, true);
+  window.addEventListener('pointerdown', done, true);   // the next press is a new click
+  timer = setTimeout(done, 1500);
+}
+
+function closeMenu({ focus = false } = {}) {
+  if (!openMenu) return;
+  const { pop, trigger, cleanup } = openMenu;
+  openMenu = null;
+  cleanup();
+  pop.remove();
+  trigger.setAttribute('aria-expanded', 'false');
+  if (focus && trigger.isConnected) trigger.focus();
+}
+
+function showMenu(trigger, items, align, focusFirst) {
+  closeMenu();
+  const pop = h('div', { class: 'menu-pop', role: 'menu', tabindex: '-1' });
+  if (trigger.id) pop.setAttribute('aria-labelledby', trigger.id);
+  else pop.setAttribute('aria-label', trigger.getAttribute('aria-label') || trigger.textContent.trim() || 'Actions');
+  const entries = [];
+  for (const it of items) {
+    if (!it) continue;
+    if (it === 'separator' || it.separator) {
+      if (pop.lastElementChild && !pop.lastElementChild.classList.contains('menu-sep')) pop.append(h('div', { class: 'menu-sep', role: 'separator' }));
+      continue;
+    }
+    if (it.heading) { pop.append(h('div', { class: 'menu-heading', role: 'presentation' }, it.heading)); continue; }
+    const content = [
+      it.icon ? icon(it.icon, { size: 15 }) : h('span', { class: 'menu-icon-pad' }),
+      h('span', { class: 'menu-text' }, h('span', { class: 'menu-label' }, it.label), it.hint ? h('span', { class: 'menu-hint' }, it.hint) : null),
+    ];
+    const cls = it.danger ? 'menu-item danger' : 'menu-item';
+    let el;
+    if (it.href && !it.disabled) {
+      el = h('a', { class: cls, role: 'menuitem', tabindex: '-1', href: it.href, target: it.target, rel: it.target ? 'noopener' : undefined }, content);
+      if (it.download !== undefined && it.download !== false) el.setAttribute('download', it.download === true ? '' : String(it.download));
+      // the link's own navigation or download runs after this handler; the menu closes just after it
+      el.addEventListener('click', () => {
+        setTimeout(() => { if (openMenu && openMenu.pop === pop) closeMenu({ focus: true }); }, 0);
+        if (!it.onClick) return;
+        Promise.resolve().then(() => it.onClick()).catch((err) => { toast(err.message || String(err), 'error'); console.error(err); });
+      });
+    } else {
+      el = h('button', { class: cls, type: 'button', role: 'menuitem', tabindex: '-1', disabled: !!it.disabled }, content);
+      el.addEventListener('click', async () => {
+        closeMenu({ focus: true });
+        if (!it.onClick) return;
+        try { await it.onClick(); } catch (err) { toast(err.message || String(err), 'error'); console.error(err); }
+      });
+    }
+    if (it.title) el.title = it.title;
+    entries.push(el);
+    pop.append(el);
+  }
+  if (pop.lastElementChild && pop.lastElementChild.classList.contains('menu-sep')) pop.lastElementChild.remove();
+  document.body.append(pop);
+  let below = null;   // which side of the button the menu opened on; kept while it follows a scroll
+  const place = () => {
+    const r = trigger.getBoundingClientRect();
+    if (!trigger.isConnected || r.bottom < 0 || r.top > window.innerHeight) return false;
+    const pw = pop.offsetWidth;
+    const ph = pop.offsetHeight;
+    let left = align === 'start' ? r.left : r.right - pw;
+    left = Math.max(8, Math.min(left, window.innerWidth - pw - 8));
+    if (below === null) below = !(r.bottom + 4 + ph > window.innerHeight - 8 && r.top - ph - 4 >= 8);
+    const top = below ? r.bottom + 4 : r.top - ph - 4;
+    pop.style.left = `${Math.round(left)}px`;
+    pop.style.top = `${Math.round(top)}px`;
+    return true;
+  };
+  place();
+  trigger.setAttribute('aria-expanded', 'true');
+
+  const enabled = () => entries.filter((e) => !e.disabled);
+  const focusAt = (i) => { const list = enabled(); if (list.length) list[((i % list.length) + list.length) % list.length].focus(); };
+  pop.addEventListener('keydown', (e) => {
+    const list = enabled();
+    const i = list.indexOf(document.activeElement);
+    if (e.key === 'ArrowDown') { e.preventDefault(); focusAt(i + 1); } else if (e.key === 'ArrowUp') { e.preventDefault(); focusAt(i < 0 ? -1 : i - 1); } else if (e.key === 'Home') { e.preventDefault(); focusAt(0); } else if (e.key === 'End') { e.preventDefault(); focusAt(-1); } else if (e.key === 'Escape' || e.key === 'Tab') { e.preventDefault(); e.stopPropagation(); closeMenu({ focus: true }); } else if (e.key === ' ' && i >= 0 && list[i].tagName === 'A') {
+      // Space picks a link item as it picks a button item (a link alone would scroll the page)
+      e.preventDefault();
+      list[i].click();
+    }
+  });
+  const onDown = (e) => {
+    if (pop.contains(e.target) || trigger.contains(e.target)) return;
+    closeMenu();
+    if (e.button === 0) swallowRowClick(e.target);
+  };
+  // a repaint that removes the menu's button (its row rebuilt) closes the menu, which would act on a row no longer shown
+  const watch = typeof MutationObserver === 'function'
+    ? new MutationObserver(() => { if (!trigger.isConnected && openMenu && openMenu.pop === pop) closeMenu(); }) : null;
+  if (watch) watch.observe(document.body, { childList: true, subtree: true });
+  // a scroll of the page moves the menu with its button (a click often lands while the page still scrolls); the menu
+  // closes once the button has left the window
+  const onScroll = (e) => { if (!pop.contains(e.target) && !place()) closeMenu(); };
+  const onResize = () => closeMenu();
+  document.addEventListener('pointerdown', onDown, true);
+  window.addEventListener('scroll', onScroll, true);
+  window.addEventListener('resize', onResize);
+  window.addEventListener('hashchange', onResize);
+  openMenu = {
+    pop, trigger,
+    cleanup() {
+      if (watch) watch.disconnect();
+      document.removeEventListener('pointerdown', onDown, true);
+      window.removeEventListener('scroll', onScroll, true);
+      window.removeEventListener('resize', onResize);
+      window.removeEventListener('hashchange', onResize);
+    },
+  };
+  if (focusFirst) focusAt(focusFirst === 'last' ? -1 : 0); else pop.focus({ preventScroll: true });
+}
+
+/**
+ * Button that opens a menu of actions.
+ * items: array (or a function returning one, called at each opening) of
+ *   {label, icon, hint, onClick, href, download, target, danger, disabled, title} | 'separator' | {heading}.
+ *   onClick may be async (a rejection is reported with toast()); an item with href is a link (download: true or a
+ *   file name saves the file).
+ * Without a label the button is the icon-only "More actions" button (icon 'more', ghost); with one it is a button
+ * with a caret. Returns the button.
+ */
+export function menuButton({ items, label = '', icon: iconName, kind, small = false, title, align = 'end', cls = '' } = {}) {
+  const ic = iconName === undefined ? (label ? null : 'more') : iconName;
+  const k = kind === undefined ? (label ? '' : 'ghost') : kind;
+  const b = h('button', {
+    type: 'button', class: ['btn', k, small ? 'small' : '', label ? '' : 'icon-only', 'menu-trigger', cls].filter(Boolean).join(' '),
+    title: title || (label ? undefined : 'More actions'), 'aria-haspopup': 'menu', 'aria-expanded': 'false',
+  }, ic ? icon(ic, { size: small ? 14 : 16 }) : null, label || null, label ? icon('chevron-down', { size: 13, cls: 'caret' }) : null);
+  if (!label) b.setAttribute('aria-label', title || 'More actions');
+  const list = () => (typeof items === 'function' ? items() : items) || [];
+  b.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (openMenu && openMenu.trigger === b) { closeMenu(); return; }
+    showMenu(b, list(), align, e.detail === 0 ? 'first' : null);   // detail 0: opened with the keyboard
+  });
+  b.addEventListener('keydown', (e) => {
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    e.preventDefault();
+    showMenu(b, list(), align, e.key === 'ArrowUp' ? 'last' : 'first');
+  });
+  return b;
+}
+
 export function card({ title, subtitle, actions, body, footer, cls = '', flush = false } = {}) {
   return h('section', { class: `card ${cls}`.trim() },
     (title || actions) ? h('div', { class: 'card-header' },
@@ -326,6 +496,7 @@ let modalCount = 0;
 
 export function modal({ title, body, actions = [], size = '', onClose, dismissable = true } = {}) {
   const root = document.getElementById('modal-root') || document.body;
+  closeMenu({ focus: true });                                                   // a dialog takes over from an open menu
   const opener = document.activeElement;
   let closed = false;
   const close = () => {
@@ -344,6 +515,7 @@ export function modal({ title, body, actions = [], size = '', onClose, dismissab
     .filter((el) => !el.disabled && el.offsetParent !== null);
   const onKey = (e) => {
     if (root.lastElementChild !== backdrop) return;                             // a dialog opened on top of this one
+    if (openMenu && openMenu.pop.contains(document.activeElement)) return;      // a menu open in the dialog handles its keys
     if (e.key === 'Escape' && dismissable) { e.stopPropagation(); close(); return; }
     if (e.key !== 'Tab') return;
     const items = focusables();                                                 // keep Tab inside the dialog

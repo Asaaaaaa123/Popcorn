@@ -1,7 +1,7 @@
 // signature-editor.js — the Signatures tab: the gene signatures of Table 1 and how they are used (positivity calls =
 // cfg.primary, tissue assignment = cfg.programs), tissue classes, host receptor panel, adipocyte genes and ubiquitous
 // transcripts. Gene chips are colored with the last data-check report. Edits change the draft config in place.
-import { h, mount, icon, card, button, switchToggle, confirmDialog, promptDialog, toast, clone, emptyState } from '../core.js';
+import { h, mount, icon, card, button, menuButton, switchToggle, confirmDialog, promptDialog, toast, clone, emptyState } from '../core.js';
 import { chipInput, chipSelect, signatureOptions, optionLabel, iconButton, uniqueList } from './chips.js';
 
 const SIG_RE = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
@@ -175,7 +175,7 @@ export function signatureEditor({ cfg, defaults, report, ui, onChange }) {
   };
   const geneState = (g) => (cov.missing.has(g) ? 'bad' : cov.present.has(g) ? 'ok' : '');
   const geneTip = (g) => (cov.missing.has(g) ? 'Not in the probe set of these sections'
-    : cov.present.has(g) ? 'In the probe set' : (cov.known ? 'Not checked yet: run “Validate data”' : ''));
+    : cov.present.has(g) ? 'In the probe set' : (cov.known ? 'Not checked yet: use Check again in the Data tab' : ''));
   const missingOf = (s) => (cov.known ? signatureGenes(s).filter((g) => cov.missing.has(g)) : []);
 
   // editor-level references refreshed by setReport() and by edits elsewhere
@@ -282,8 +282,9 @@ export function signatureEditor({ cfg, defaults, report, ui, onChange }) {
         input.addEventListener('input', () => { r.gene = input.value; write(); });
         reason.addEventListener('input', () => { r.reason = reason.value; write(); });
         inputs.push({ input, r });
-        return h('div', { class: 'sig-ex-row' }, input, reason,
-          iconButton('trash', `Remove excluded gene ${r.gene || i + 1}`, () => { rows.splice(i, 1); paint(); write(); }));
+        return h('div', { class: 'sig-ex-row has-row-actions' }, input, reason,
+          h('span', { class: 'row-actions' },
+            iconButton('trash', `Remove excluded gene ${r.gene || i + 1}`, () => { rows.splice(i, 1); paint(); write(); })));
       })) : h('p', { class: 'muted small' }, 'No excluded genes.'),
       h('div', { class: 'row' }, button({ label: 'Add excluded gene', icon: 'plus', small: true, onClick: () => { rows.push({ gene: '', reason: '' }); paint(true); } })));
       if (focusLast && inputs.length) inputs[inputs.length - 1].input.focus();
@@ -300,8 +301,10 @@ export function signatureEditor({ cfg, defaults, report, ui, onChange }) {
       flagSwitches = { primary: null, programs: null };
       paintCoreNote = () => {};
       mount(editorBody, emptyState({
-        icon: 'dna', title: 'No signatures', text: 'Add a signature, or reset the gene sets to the manuscript defaults.',
-        action: button({ label: 'Add signature', icon: 'plus', kind: 'primary', onClick: addSignature }),
+        icon: 'dna', title: 'No signatures', text: 'Add a signature, or start again from the gene sets of the manuscript.',
+        action: h('div', { class: 'row sig-empty-actions' },
+          button({ label: 'Add signature', icon: 'plus', kind: 'primary', onClick: addSignature }),
+          button({ label: 'Reset to manuscript defaults', icon: 'undo', onClick: resetToDefaults })),
       }));
       return;
     }
@@ -334,11 +337,19 @@ export function signatureEditor({ cfg, defaults, report, ui, onChange }) {
     });
     keyInput.addEventListener('change', commitKey);
 
+    // the destructive action sits in a menu, not as a red button next to the title; the dialog still confirms it
+    const actions = menuButton({
+      title: 'Signature actions',
+      items: [{ label: 'Delete signature', icon: 'trash', danger: true, onClick: () => removeSignature(name) }],
+    });
     const head = h('div', { class: 'sig-head' });
-    const paintHead = () => mount(head,
-      h('span', { class: 'swatch sig-head-swatch', style: { background: HEX_RE.test(String(s.color)) ? s.color : 'transparent' } }),
-      h('div', { class: 'sig-head-titles' }, h('h2', null, s.label || name), h('div', { class: 'muted small mono' }, name)),
-      button({ label: 'Delete', icon: 'trash', kind: 'danger', small: true, onClick: () => removeSignature(name) }));
+    const paintHead = () => {
+      actions.setAttribute('aria-label', `Signature actions: ${s.label || name}`);
+      mount(head,
+        h('span', { class: 'swatch sig-head-swatch', style: { background: HEX_RE.test(String(s.color)) ? s.color : 'transparent' } }),
+        h('div', { class: 'sig-head-titles' }, h('h2', null, s.label || name), h('div', { class: 'muted small mono' }, name)),
+        actions);
+    };
     paintHead();
 
     const text = (label, key, opts = {}) => {
@@ -458,7 +469,7 @@ export function signatureEditor({ cfg, defaults, report, ui, onChange }) {
           h('p', null, h('strong', null, 'Still selected in the Parameters tab:')),
           h('ul', null, uses.map((u) => h('li', null, u.where, u.step && !stepOn(u) ? ' (step switched off)' : ''))),
           after.length ? h('p', null, after.join(' ')) : null] : null,
-        h('p', { class: 'muted' }, 'Discard (top of the page) restores the saved configuration.')),
+        h('p', { class: 'muted' }, 'Discard (in the bar at the bottom of the page) restores the saved configuration.')),
       confirmLabel: 'Delete signature', danger: true,
     });
     if (!ok) return;
@@ -469,6 +480,19 @@ export function signatureEditor({ cfg, defaults, report, ui, onChange }) {
     ui.signature = rest[Math.min(i, rest.length - 1)] || null;
     emit();
     paintAll();
+    focusShownLater();         // the menu button that opened the dialog is gone
+  }
+
+  /**
+   * After a dialog whose answer re-rendered the editor: the focus goes to the signature shown (or to "Add signature")
+   * once the dialog has closed and the page is no longer inert. The dialog then gives the focus back to the button
+   * that opened it, when that button is still on the page.
+   */
+  function focusShownLater() {
+    setTimeout(() => {
+      const target = listEl.querySelector('.sig-item.active') || editorBody.querySelector('.btn');
+      if (target && target.isConnected) target.focus();
+    }, 0);
   }
 
   async function addSignature() {
@@ -512,15 +536,17 @@ export function signatureEditor({ cfg, defaults, report, ui, onChange }) {
           h('span', { class: 'order-n' }, String(i + 1)),
           h('span', { class: 'swatch', style: { background: s && HEX_RE.test(String(s.color)) ? s.color : 'transparent' } }),
           h('span', { class: s ? 'order-label' : 'order-label bad', title: s ? n : 'Unknown signature' }, s ? (s.label || n) : `${n} (unknown)`),
-          iconButton('chevron-up', `Move ${n} up in ${title}`, () => move(i, -1), { disabled: i === 0, cls: 'order-up' }),
-          iconButton('chevron-down', `Move ${n} down in ${title}`, () => move(i, 1), { disabled: i === l.length - 1, cls: 'order-down' }),
-          iconButton('x', `Remove ${n} from ${title}`, () => {
-            l.splice(i, 1);
-            emit();
-            paintOrder({ key, index: Math.min(i, l.length - 1), dir: 'remove' });
-            paintList();
-            syncFlags();
-          }));
+          // shown while the item is hovered or one of them has the focus (.row-actions); Tab still reaches them
+          h('span', { class: 'row-actions' },
+            iconButton('chevron-up', `Move ${n} up in ${title}`, () => move(i, -1), { disabled: i === 0, cls: 'order-up' }),
+            iconButton('chevron-down', `Move ${n} down in ${title}`, () => move(i, 1), { disabled: i === l.length - 1, cls: 'order-down' }),
+            iconButton('x', `Remove ${n} from ${title}`, () => {
+              l.splice(i, 1);
+              emit();
+              paintOrder({ key, index: Math.min(i, l.length - 1), dir: 'remove' });
+              paintList();
+              syncFlags();
+            })));
       });
       const rest = Object.keys(all).filter((n) => !l.includes(n));
       const add = h('select', { class: 'select', 'aria-label': `Add a signature to ${title}`, disabled: !rest.length },
@@ -592,20 +618,21 @@ export function signatureEditor({ cfg, defaults, report, ui, onChange }) {
         paintClasses({ index: j, dir: d < 0 ? '.cls-up' : '.cls-down' });
       };
       return h('li', { class: 'cls-row' }, colorInput, nameInput, emphasis,
-        iconButton('chevron-up', `Move class ${c.name} up`, () => move(-1), { disabled: i === 0, cls: 'cls-up' }),
-        iconButton('chevron-down', `Move class ${c.name} down`, () => move(1), { disabled: i === classes.length - 1, cls: 'cls-down' }),
-        iconButton('trash', `Remove class ${c.name}`, async () => {
-          const users = Object.entries(sigs()).filter(([, s]) => s && s.class === c.name).map(([n, s]) => s.label || n);
-          if (users.length && !await confirmDialog({
-            title: `Remove the class “${c.name}”?`,
-            message: `${users.join(', ')} ${users.length === 1 ? 'uses' : 'use'} this class. They stay in the tissue assignment but are not drawn in Figure 3, like class “removed”.`,
-            confirmLabel: 'Remove class', danger: true,
-          })) return;
-          classes.splice(i, 1);
-          emit();
-          paintClasses({ index: Math.min(i, classes.length - 1), dir: '.cls-up' });
-          paintEditor();
-        }));
+        h('span', { class: 'row-actions' },
+          iconButton('chevron-up', `Move class ${c.name} up`, () => move(-1), { disabled: i === 0, cls: 'cls-up' }),
+          iconButton('chevron-down', `Move class ${c.name} down`, () => move(1), { disabled: i === classes.length - 1, cls: 'cls-down' }),
+          iconButton('trash', `Remove class ${c.name}`, async () => {
+            const users = Object.entries(sigs()).filter(([, s]) => s && s.class === c.name).map(([n, s]) => s.label || n);
+            if (users.length && !await confirmDialog({
+              title: `Remove the class “${c.name}”?`,
+              message: `${users.join(', ')} ${users.length === 1 ? 'uses' : 'use'} this class. They stay in the tissue assignment but are not drawn in Figure 3, like class “removed”.`,
+              confirmLabel: 'Remove class', danger: true,
+            })) return;
+            classes.splice(i, 1);
+            emit();
+            paintClasses({ index: Math.min(i, classes.length - 1), dir: '.cls-up' });
+            paintEditor();
+          })));
     });
     const add = button({
       label: 'Add class', icon: 'plus', small: true,
@@ -665,8 +692,9 @@ export function signatureEditor({ cfg, defaults, report, ui, onChange }) {
       input.addEventListener('input', () => { r.gene = input.value; writePanel(); });
       role.addEventListener('input', () => { r.role = role.value; writePanel(); });
       panelInputs.push({ input, r });
-      return h('div', { class: 'panel-row' }, input, role,
-        iconButton('trash', `Remove ${r.gene || `row ${i + 1}`} from the receptor panel`, () => { panelRows.splice(i, 1); writePanel(); paintPanel(); }));
+      return h('div', { class: 'panel-row has-row-actions' }, input, role,
+        h('span', { class: 'row-actions' },
+          iconButton('trash', `Remove ${r.gene || `row ${i + 1}`} from the receptor panel`, () => { panelRows.splice(i, 1); writePanel(); paintPanel(); })));
     });
     const add = button({ label: 'Add gene', icon: 'plus', small: true, onClick: () => { panelRows.push({ gene: '', role: '' }); paintPanel(true); } });
     mount(panelBody, items.length ? h('div', { class: 'panel-rows' }, items) : h('p', { class: 'muted' }, 'The receptor panel is empty.'), h('div', { class: 'row' }, add));
@@ -682,24 +710,34 @@ export function signatureEditor({ cfg, defaults, report, ui, onChange }) {
   const adipocyte = geneList('adipocyte_genes', 'Adipocyte genes');
   const ubiquitous = geneList('ubiquitous', 'Ubiquitous transcripts');
 
-  const resetBtn = button({
-    label: 'Reset gene sets to the manuscript defaults', icon: 'undo', kind: 'danger', small: true,
-    onClick: async () => {
-      const ok = await confirmDialog({
-        title: 'Reset the gene sets?',
-        message: 'Signatures, tissue classes, positivity calls, tissue assignment, host receptor panel, adipocyte genes and '
-          + 'ubiquitous transcripts return to the manuscript defaults. Other parameters are kept; settings that name '
-          + 'signatures that no longer exist are reported by the validation.',
-        confirmLabel: 'Reset gene sets', danger: true,
-      });
-      if (!ok) return;
-      resetGeneSets(cfg, defaults);
-      ui.signature = null;
-      emit();
-      paintAll();
-      toast('Gene sets reset to the manuscript defaults', 'success');
-    },
-  });
+  // Start over from the gene sets of the manuscript (Table 1): in the menu of the Signatures card (and in the empty
+  // state), with the confirmation dialog, rather than as a red button of its own.
+  async function resetToDefaults() {
+    const ok = await confirmDialog({
+      title: 'Reset the gene sets?',
+      message: 'Signatures, tissue classes, positivity calls, tissue assignment, host receptor panel, adipocyte genes and '
+        + 'ubiquitous transcripts return to the manuscript defaults. Other parameters are kept; settings that name '
+        + 'signatures that no longer exist are reported by the validation.',
+      confirmLabel: 'Reset gene sets', danger: true,
+    });
+    if (!ok) return;
+    resetGeneSets(cfg, defaults);
+    ui.signature = null;
+    emit();
+    paintAll();
+    focusShownLater();         // when it was the button of the empty state, that button is gone
+    toast('Gene sets reset to the manuscript defaults', 'success');
+  }
+  const listActions = [
+    button({ label: 'Add', icon: 'plus', small: true, onClick: addSignature }),
+    menuButton({
+      title: 'Gene set actions', small: true,
+      items: [{
+        label: 'Reset gene sets to manuscript defaults', icon: 'undo', danger: true, onClick: resetToDefaults,
+        hint: 'Signatures, tissue classes, calling order, receptor panel and gene lists (Table 1)',
+      }],
+    }),
+  ];
 
   function paintAll() {
     paintList();
@@ -716,7 +754,7 @@ export function signatureEditor({ cfg, defaults, report, ui, onChange }) {
 
   const el = h('div', { class: 'stack-lg sig-tab' },
     h('div', { class: 'sig-layout' },
-      card({ title: 'Signatures', subtitle: countEl, actions: button({ label: 'Add', icon: 'plus', small: true, onClick: addSignature }), body: h('div', { class: 'stack' }, filter, listEl), cls: 'sig-side', flush: false }),
+      card({ title: 'Signatures', subtitle: countEl, actions: listActions, body: h('div', { class: 'stack' }, filter, listEl), cls: 'sig-side', flush: false }),
       h('section', { class: 'card sig-main' }, editorBody)),
     card({ title: 'Calling order', subtitle: 'Order of the positivity calls and of the tissue assignment (P and A in the list).', body: orderBody }),
     h('div', { class: 'grid-2' },
@@ -724,8 +762,7 @@ export function signatureEditor({ cfg, defaults, report, ui, onChange }) {
       card({ title: 'Host receptor panel', subtitle: 'Figure 6b: gene and role. Genes missing from the probe set are outlined.', body: panelBody })),
     h('div', { class: 'grid-2' },
       card({ title: 'Adipocyte genes', subtitle: 'Supplementary Figure S4.', body: adipocyte.el }),
-      card({ title: 'Ubiquitous transcripts', subtitle: 'Transcripts abundant in essentially every cell; a Leiden domain headed by them has no interpretable identity.', body: ubiquitous.el })),
-    card({ title: 'Manuscript defaults', body: h('div', { class: 'row between' }, h('p', { class: 'muted', style: 'margin:0' }, 'Start over from the gene sets of the manuscript (Table 1).'), resetBtn) }));
+      card({ title: 'Ubiquitous transcripts', subtitle: 'Transcripts abundant in essentially every cell; a Leiden domain headed by them has no interpretable identity.', body: ubiquitous.el })));
 
   paintAll();
 

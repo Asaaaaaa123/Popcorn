@@ -41,17 +41,19 @@ const workflow = () => [
     ],
   },
   {
-    title: 'Validate',
+    title: 'Check the data',
     body: [
-      h('em', null, 'Validate'), ' checks every section without running the analysis: the bin folders, positions, scale factors and H&E image, the number of bins, and which genes of each signature are in the probe set. ',
-      h('strong', null, 'Errors'), ' must be fixed before a run can start; ', h('strong', null, 'warnings'), ' point at things worth a look (a missing gene, an unusual parameter).',
+      'The ', h('em', null, 'Data check'), ' of the Data tab checks every section without running the analysis: the bin folders, positions, scale factors and H&E image, the number of bins, and which genes of each signature are in the probe set (',
+      h('em', null, 'Check again'), ' repeats it). The chip at the top right of a project (',
+      h('em', null, 'Settings valid'), ', or the number of errors and warnings) opens the check of the settings, with ', h('em', null, 'Check the data again'), '. ',
+      h('strong', null, 'Errors'), ' must be fixed before a run can start; ', h('strong', null, 'warnings'), ' point at things worth a look (a missing gene, an unusual parameter). Unsaved changes show a bar at the bottom of the page with ',
+      h('em', null, 'Save'), ' and ', h('em', null, 'Discard'), ' (Ctrl+S saves).',
     ],
   },
   {
     title: 'Look at the raw data',
     body: [
-      'The ', h('em', null, 'Explore'), ' tab reads every section as Space Ranger wrote it, with the current settings (saved or not) and before any run: a table of the bins, genes and UMIs of each section, the median UMIs, genes and mitochondrial share per bin, and how many bins pass the quality control set under Parameters; maps of these per-bin numbers or of any gene (several are summed), in one, two or four linked panels with the H&E image underneath; and the genes of a section ranked by UMIs, each with ',
-      h('em', null, 'Show on map'), ' and ', h('em', null, 'Overlay'), '. The ', h('em', null, 'Explore'), ' button next to a section in the Data tab opens it there.',
+      'The ', h('em', null, 'Explore'), ' tab reads every section as Space Ranger wrote it, with the current settings (saved or not) and before any run: a table of the bins, genes and UMIs of each section, the median UMIs, genes and mitochondrial share per bin, and how many bins pass the quality control set under Parameters; maps of these per-bin numbers or of any gene (several are summed), in one, two or four linked panels with the H&E image underneath; and the genes of a section ranked by UMIs, where a click on a gene colors the map by it and the layers button at the end of its row adds it as an overlay. In the Data tab, the bin count of a section opens it there.',
     ],
   },
   {
@@ -79,9 +81,10 @@ const workflow = () => [
     title: 'Explore the results',
     body: [
       h('em', null, 'Summary'), ': bins per section through quality control and the region of interest, and the key numbers with their confidence intervals. ',
-      h('em', null, 'Figures'), ': the manuscript figures as PNG and PDF. ',
-      h('em', null, 'Tables'), ': every CSV output, searchable and sortable, plus the AnnData object for further work in Python; ',
-      h('em', null, 'Export for Loupe Browser'), ' (above the tables) downloads the per-bin calls as category files for 10x Genomics Loupe Browser — the ', code('_008um'),
+      h('em', null, 'Figures'), ': the manuscript figures; a click opens one full size with its PNG and PDF. ',
+      h('em', null, 'Tables'), ': every CSV output, searchable and sortable, plus the AnnData object for further work in Python. ',
+      'The ', h('em', null, 'Export'), ' menu at the top of a run downloads all results, the figures or the tables as one zip file, or ', h('em', null, 'Loupe Browser'),
+      ': the per-bin calls as category files for 10x Genomics Loupe Browser — the ', code('_008um'),
       ' file of a section goes into its ', code('outs/cloupe_008um.cloupe'), ', and README.txt in the zip says how to import it. ',
       h('em', null, 'Spatial viewer'), ': every bin at its position, colored by tissue class, assigned signature, Leiden domain, region of interest, a positivity call, the UMI count or the counts of any genes (numbers and counts are colored up to their 99th percentile, marked ≥ in the legend, so that a few extreme bins do not flatten the map); one, two or four panels side by side with linked pan and zoom and, for panels colored by the same gene or number, one shared color scale (Color scales → Shared); yes/no overlays (calls, region of interest, “gene detected”) on top and the H&E image underneath.',
     ],
@@ -123,6 +126,7 @@ const GLOSSARY = [
 ];
 
 const SHORTCUTS = [
+  ['Rows, cards and menus', 'Click a project card, a run or a gene to open it (or show it on the map). Less frequent actions (Duplicate, Delete, Move up, Remove …) are in the ⋯ menu of the row or page, which appears when the pointer is over the row or the keyboard focus is in it; in a menu, ↑ and ↓ move, Enter picks, Esc closes.'],
   ['Figures', 'Click a figure to enlarge it; ← and → step through the figures, a click on the image switches between fitting the window and actual size, Esc closes.'],
   ['Tables', 'Click a column header to sort (again to reverse); the search box filters every column; Esc clears it.'],
   ['Maps (Spatial viewer, Explore)', 'Drag to pan, scroll or double-click to zoom (Shift + double-click zooms out); with a map focused, the arrow keys pan, + and − zoom and 0 fits the section (every panel’s section while the views are linked). Click a legend entry to hide or show it, Alt + click to show only that entry. In a gene box, ↑ and ↓ pick a suggestion and Enter shows it; commas separate genes whose counts are summed.'],

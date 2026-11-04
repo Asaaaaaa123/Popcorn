@@ -1999,6 +1999,32 @@ def is_table_file(name: str) -> bool:
     return name.lower().endswith(TABLE_SUFFIXES)
 
 
+RESULT_PARTS = {"all": "results", "figures": "figures", "tables": "tables"}  # part -> what the error messages call it
+STORED_SUFFIXES = (".png", ".pdf", ".gz", ".zip", ".jpg", ".jpeg", ".tif", ".tiff")  # compressed already: not deflated
+
+
+def results_zip(results: Path, part: str, out, extra: dict[str, Path] | None = None) -> int:
+    """Write result files of a run into the zip file `out` (a path or a binary file), at their paths under results/:
+    part "figures" the figures (PNG and PDF under figures/), "tables" the tables (CSV and TSV, also gzipped), "all"
+    every result file except AnnData objects (.h5ad, often gigabytes; they are downloaded on their own) and then
+    `extra` (name in the zip -> file; missing files are left out). Returns the number of result files written."""
+    files = scan_results(results)
+    if part == "figures":
+        names = [rel for rel in files if rel.startswith("figures/") and rel.lower().endswith((".png", ".pdf"))]
+    elif part == "tables":
+        names = [rel for rel in files if is_table_file(rel)]
+    else:
+        names = [rel for rel in files if not rel.lower().endswith(".h5ad")]
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+        for rel in names:
+            stored = rel.lower().endswith(STORED_SUFFIXES)
+            zf.write(results / rel, rel, compress_type=zipfile.ZIP_STORED if stored else zipfile.ZIP_DEFLATED)
+        for name, path in (extra or {}).items():
+            if path.is_file():
+                zf.write(path, name)
+    return len(names)
+
+
 def read_manifest_entries(path: Path, key: str) -> list[dict]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -2932,6 +2958,33 @@ def create_app(workspace: Path, token: str | None = None, worker_module: str = "
             remove_quietly(tmp)
             raise
         return FileResponse(tmp, media_type="application/zip", filename=f"{rid}_loupe.zip",
+                            headers={"Cache-Control": "no-store"}, background=BackgroundTask(remove_quietly, tmp))
+
+    @app.get("/api/runs/{rid}/export/results")
+    def export_results(rid: str, part: str = "all"):
+        """The run's figures, tables or all its results (without .h5ad objects, with the run's configuration and log)
+        as one zip file."""
+        run_dir = require_run(rid)
+        if part not in RESULT_PARTS:
+            raise HTTPException(400, f"part must be one of: {', '.join(RESULT_PARTS)}")
+        status = jobs.get_run(rid).get("status")
+        if jobs.is_busy(rid) or status in ACTIVE_STATUSES:
+            raise HTTPException(409, f"run {rid} is {status}; download its {RESULT_PARTS[part]} when it has finished")
+        extra = {"run_config.json": run_dir / "config.json", "run_log.txt": storage.log_path(rid)} \
+            if part == "all" else None
+        fd, tmp = tempfile.mkstemp(prefix="bss-results-", suffix=".zip")
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                n = results_zip(run_dir / "results", part, fh, extra)
+        except BaseException:
+            remove_quietly(tmp)
+            raise
+        if n == 0:
+            remove_quietly(tmp)
+            raise NotFound(f"run {rid} has no {RESULT_PARTS[part]}"
+                           + ("" if status == "succeeded" else f": it stopped ({status}) before writing any"))
+        name = f"{rid}_{'results' if part == 'all' else part}.zip"
+        return FileResponse(tmp, media_type="application/zip", filename=name,
                             headers={"Cache-Control": "no-store"}, background=BackgroundTask(remove_quietly, tmp))
 
     # ---- demo --------------------------------------------------------------------------------------------------

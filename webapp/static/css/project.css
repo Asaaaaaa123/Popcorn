@@ -16,7 +16,6 @@
   color: var(--accent-text); font: inherit; text-decoration: underline; cursor: pointer;
 }
 .linklike:hover { color: var(--accent-hover); }
-.plain-link:hover { text-decoration: none; }
 .center { text-align: center; }
 kbd {
   font: 11.5px var(--mono); padding: 1px 5px; white-space: nowrap;
@@ -33,9 +32,14 @@ kbd {
 .projects-tools { margin-bottom: 14px; }
 .projects-filter { max-width: 300px; }
 .project-grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
-.project-card { display: flex; flex-direction: column; gap: 10px; padding: 16px 18px 14px; }
-.pc-head { display: flex; align-items: flex-start; gap: 8px; justify-content: space-between; }
-.pc-name { font-size: 16px; font-weight: 650; color: var(--text); overflow-wrap: anywhere; }
+/* the whole card opens the project (card.clickable); its actions menu sits top right, revealed on hover or focus */
+.project-card { display: flex; flex-direction: column; gap: 10px; padding: 16px 18px; }
+.pc-head { display: flex; align-items: flex-start; gap: 8px; }
+.pc-name { flex: 1 1 auto; min-width: 0; font-size: 16px; font-weight: 650; color: var(--text); overflow-wrap: anywhere; }
+.pc-name:hover { text-decoration: none; }
+.project-card.clickable:hover .pc-name { color: var(--accent-text); }
+.pc-head .badge { margin-top: 1px; }
+.pc-menu { flex: 0 0 auto; margin: -4px -8px -4px 0; }
 .pc-root { display: flex; align-items: center; gap: 6px; min-width: 0; color: var(--text-muted); font-size: 12.5px; }
 .pc-root .truncate { flex: 1 1 auto; min-width: 0; }
 .pc-meta { display: grid; grid-template-columns: auto auto 1fr; gap: 6px 18px; margin: 2px 0 0; }
@@ -43,7 +47,7 @@ kbd {
 .pc-meta dd { margin: 2px 0 0; font-size: 13px; }
 .pc-run { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .pc-run:hover { text-decoration: none; }
-.pc-actions { display: flex; align-items: center; gap: 8px; margin-top: auto; padding-top: 12px; border-top: 1px solid var(--border); }
+.pc-run:hover .muted { color: var(--text); }
 .intro-steps { margin-top: 4px; }
 .intro-step { padding: 18px; }
 .intro-step h3 { margin: 10px 0 6px; }
@@ -66,18 +70,23 @@ kbd {
 .title-input:focus { outline: none; border-color: var(--accent); box-shadow: var(--focus); background: var(--surface); }
 .title-input.invalid { border-color: var(--danger); }
 .project-meta { font-size: 12.5px; }
-.vchips { display: flex; gap: 6px; align-items: center; }
+/* the header's one control: the configuration check chip, which opens the check panel (.vpanel) below the header */
 .vchip {
-  display: inline-flex; align-items: center; gap: 5px; height: 28px; padding: 0 10px; border-radius: 14px;
+  display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 10px 0 11px; border-radius: 15px;
   border: 1px solid var(--border); background: var(--surface-2); color: var(--text-muted);
   font: 600 12.5px var(--font); white-space: nowrap;
 }
-button.vchip { cursor: pointer; }
+button.vchip { cursor: pointer; transition: border-color 0.12s, box-shadow 0.12s; }
+button.vchip:hover { border-color: currentColor; }
 .vchip.bad { background: var(--danger-soft); color: var(--danger); border-color: color-mix(in srgb, var(--danger) 30%, transparent); }
 .vchip.warn { background: var(--warning-soft); color: var(--warning); border-color: color-mix(in srgb, var(--warning) 30%, transparent); }
 .vchip.ok { background: var(--success-soft); color: var(--success); border-color: color-mix(in srgb, var(--success) 30%, transparent); }
+.vchip .spinner { width: 12px; height: 12px; border-width: 2px; }
+.vchip-caret { opacity: 0.7; transition: transform 0.15s; }
+.vchip[aria-expanded="true"] .vchip-caret { transform: rotate(180deg); }
 .vpanel { margin-bottom: 16px; }
 .vpanel .banner { margin-bottom: 0; }
+.vpanel-foot { display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; padding-top: 12px; border-top: 1px solid var(--border); }
 .project-body { min-height: 240px; }
 .unsaved-bar {
   position: sticky; bottom: 14px; z-index: 30; margin-top: 22px;
@@ -153,13 +162,12 @@ button.vchip { cursor: pointer; }
 .sample-table .col-path { min-width: 190px; width: 30%; }
 .sample-table .col-path .btn { height: 30px; }
 .sample-table .col-mpp { width: 112px; min-width: 104px; }
-.sample-table .col-actions .row { flex-wrap: nowrap; gap: 0; }
+.sample-table .col-actions { width: 1%; padding-right: 10px; text-align: right; }
 .sample-table input[type="radio"] { width: 16px; height: 16px; accent-color: var(--accent); }
 .sample-table tr.row-bad td { background: color-mix(in srgb, var(--danger-soft) 55%, transparent); }
 .sample-table .sample-status { white-space: nowrap; }
 .empty-row { padding: 20px 12px !important; color: var(--text-muted); text-align: center !important; }
 .sample-foot { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 10px 14px; border-top: 1px solid var(--border); }
-.btn.danger-hover:hover:not(:disabled) { color: var(--danger); background: var(--danger-soft); }
 .input.num { font-variant-numeric: tabular-nums; }
 .report { display: flex; flex-direction: column; gap: 10px; }
 .report .banner { margin-bottom: 0; }
@@ -170,7 +178,15 @@ button.vchip { cursor: pointer; }
 .report-table .path-cell { max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .report-genes { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; }
 .report-genes-title { font-weight: 600; }
-.sample-status-row { display: flex; align-items: center; gap: 4px 8px; flex-wrap: nowrap; }
+/* the bin count of a section that was found: a quiet link into the Explore tab (its arrow shows on hover or focus) */
+.sample-explore {
+  margin: -2px -5px; padding: 2px 5px; border: 0; border-radius: 4px; background: none; cursor: pointer;
+  font-family: var(--font); text-align: left;
+}
+.sample-explore:hover { background: var(--success-soft); text-decoration: underline; text-underline-offset: 2px; }
+.sample-explore-go { opacity: 0; margin-left: -2px; transition: opacity 0.12s; }
+.sample-explore:hover .sample-explore-go, .sample-explore:focus-visible .sample-explore-go { opacity: 0.8; }
+@media (hover: none) { .sample-explore-go { opacity: 0.8; } }
 .report-explore {
   display: flex; align-items: center; gap: 8px 10px; flex-wrap: wrap; padding: 10px 12px; font-size: 13px;
   border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border)); border-radius: var(--radius); background: var(--accent-soft);
@@ -188,8 +204,16 @@ button.vchip { cursor: pointer; }
 .dx-table th { white-space: normal; vertical-align: bottom; line-height: 1.3; }
 .dx-table th.num { min-width: 64px; }
 .dx-table td { white-space: nowrap; }
-.dx-table .linklike { text-align: left; }
+/* rows whose click shows something on the map (a section, a gene; rowAction() in data-explorer.js): the name is the
+   row's button for the keyboard, plain text that takes the accent while the row is hovered */
+.table tbody tr.dx-click { cursor: pointer; }
+.table tbody tr.dx-click:hover td { background: var(--surface-2); }
+.dx-row-btn {
+  margin: 0; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer;
+}
+tr.dx-click:hover .dx-row-btn, .dx-row-btn:focus-visible { color: var(--accent-text); }
 .dx-table tbody tr.active td { background: color-mix(in srgb, var(--accent-soft) 75%, transparent); }
+.dx-table tbody tr.active.dx-click:hover td { background: var(--accent-soft); }
 .dx-table tbody tr.active td:first-child { box-shadow: inset 3px 0 0 var(--accent-text); }
 .dx-table tr.row-bad td { background: color-mix(in srgb, var(--danger-soft) 55%, transparent); }
 .dx-section { display: flex; align-items: center; gap: 8px; }
@@ -222,9 +246,15 @@ button.vchip { cursor: pointer; }
 .dx-gene-table th { white-space: normal; vertical-align: bottom; line-height: 1.3; }
 .dx-gene-table td { vertical-align: middle; white-space: nowrap; }
 .dx-gene-table td.dx-gene { font-size: 12.5px; color: var(--text); }
-.dx-gene-actions { display: flex; justify-content: flex-end; gap: 4px; }
-.dx-gene-actions .btn.active { color: var(--accent-text); background: var(--accent-soft); }
+/* the gene the highlighted panel is colored by */
+.dx-gene-table tbody tr.dx-on-map td { background: color-mix(in srgb, var(--accent-soft) 75%, transparent); }
+.dx-gene-table tbody tr.dx-on-map.dx-click:hover td { background: var(--accent-soft); }
 .dx-gene-table tr.dx-on-map td.dx-gene { box-shadow: inset 3px 0 0 var(--accent-text); }
+.dx-gene-table tr.dx-on-map .dx-gene-btn { color: var(--accent-text); font-weight: 600; }
+/* the overlay toggle stays pressed-looking under the pointer */
+.dx-act .btn.toggle[aria-pressed="true"]:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent-soft) 70%, var(--surface-3)); color: var(--accent-text);
+}
 .dx-pct { display: flex; align-items: center; gap: 8px; min-width: 120px; }
 .dx-pct-track { position: relative; flex: 0 0 64px; height: 6px; border-radius: 3px; background: var(--surface-3); overflow: hidden; }
 .dx-pct-fill { position: absolute; left: 0; top: 0; bottom: 0; background: var(--accent-text); border-radius: 3px; }
@@ -232,13 +262,26 @@ button.vchip { cursor: pointer; }
 
 /* ---------------------------------------------------------------- parameters tab */
 .pf-layout { display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 22px; align-items: start; }
-.pf-nav { position: sticky; top: 16px; display: flex; flex-direction: column; gap: 1px; padding-left: 2px; border-left: 1px solid var(--border); }
+/* the links to the cards, in groups labelled like the sidebar's; the column scrolls on its own in a short window */
+.pf-nav {
+  position: sticky; top: 16px; display: flex; flex-direction: column; gap: 16px;
+  max-height: calc(100vh - 32px); overflow-y: auto; scrollbar-width: thin;
+}
+.pf-nav-group { display: flex; flex-direction: column; min-width: 0; }
+.pf-nav-label {
+  padding: 0 0 6px 14px; color: var(--text-faint);
+  font-size: 10.5px; font-weight: 650; letter-spacing: 0.08em; text-transform: uppercase;
+}
+.pf-nav-list { display: flex; flex-direction: column; gap: 1px; border-left: 1px solid var(--border); }
 .pf-nav-item {
-  margin-left: -3px; border: 0; border-left: 2px solid transparent; background: none; padding: 6px 12px;
+  margin-left: -1px; border: 0; border-left: 2px solid transparent; background: none; padding: 5px 10px 5px 12px;
   border-radius: 0 var(--radius-sm) var(--radius-sm) 0; text-align: left; line-height: 1.35;
   color: var(--text-muted); font: 12.5px var(--font); cursor: pointer;
 }
-.pf-nav-item:hover { background: var(--surface-2); color: var(--text); border-left-color: var(--accent-text); }
+.pf-nav-item:hover { background: var(--surface-2); color: var(--text); border-left-color: var(--border-hover); }
+.pf-nav-item[aria-current="location"] { color: var(--accent-text); border-left-color: var(--accent-text); }
+/* an inset ring: the scrolling column would clip the usual outer one */
+.pf-nav-item:focus-visible { box-shadow: inset 0 0 0 2px rgba(61, 124, 245, 0.55); border-radius: 0 var(--radius-sm) var(--radius-sm) 0; }
 .pf-cards { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
 .pf-card { scroll-margin-top: 16px; }
 .pf-grid { gap: 16px 22px; }
@@ -255,6 +298,7 @@ button.vchip { cursor: pointer; }
 .pf-panel { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface-2); }
 .pf-panel-head { display: flex; gap: 8px; align-items: center; }
 .pf-panel-head .input { max-width: 420px; height: 30px; }
+.pf-panel-head .row-actions { margin-left: auto; }
 .pf-pairs .select { min-width: 150px; height: 30px; }
 .pf-pairs td { vertical-align: middle; }
 
@@ -314,6 +358,7 @@ button.vchip { cursor: pointer; }
 .cls-row { display: flex; align-items: center; gap: 8px; }
 .cls-row .cls-name { flex: 1 1 auto; min-width: 120px; height: 30px; }
 .cls-row .switch { font-size: 12.5px; }
+.sig-empty-actions { justify-content: center; }
 
 /* ---------------------------------------------------------------- region of interest tab */
 .roi-layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 16px; align-items: start; }
@@ -381,6 +426,11 @@ button.vchip { cursor: pointer; }
 .start-btn { height: 40px; padding: 0 22px; font-size: 14.5px; }
 .run-progress { display: flex; align-items: center; gap: 8px; }
 .run-progress .progress { flex: 1 1 auto; min-width: 80px; }
+/* "See all runs": a plain link in the card header, not a button */
+.project-runs-link { display: inline-flex; align-items: center; gap: 3px; font-size: 12.5px; font-weight: 500; white-space: nowrap; }
+.project-runs-link .icon { opacity: 0.8; }
+/* the rows of the project's runs open the run (the label is the link for the keyboard) */
+.project-runs tbody tr.clickable:hover td { background: var(--surface-2); }
 
 /* ---------------------------------------------------------------- narrow windows */
 @media (max-width: 1180px) {
@@ -403,9 +453,4 @@ button.vchip { cursor: pointer; }
   .dx-jump { display: flex; }
   .dx-gene-table .dx-col-bins, .dx-pct-track { display: none; }
   .dx-pct { min-width: 0; }
-}
-@media (max-width: 480px) {
-  /* and on a phone: icon buttons (named by aria-label, explained by title) */
-  .dx-btn-text { display: none; }
-  .dx-gene-actions .btn { width: 28px; padding: 0; }
 }

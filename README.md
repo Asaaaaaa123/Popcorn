@@ -35,20 +35,21 @@ Without the scripts: `python -m pip install -r requirements.txt`, then `python -
 2. **Data**: choose the folder that holds the Space Ranger outputs (e.g. `data/`, containing `SR007144_LL-2-1/` and
    `SR007144_RL-1-5/`), **Detect samples**, pick the reference (control) section; the data check confirms the bin
    folders, images, microns per pixel and which signature genes are in the probe set.
-3. **Explore** (or **Explore** next to a section): read the raw data before running anything, with the settings as
-   they are (saved or not). A table gives the bins, genes and UMIs of each section, the median UMIs, genes and
-   mitochondrial share per bin and the bins that pass the quality control of the Parameters tab; the maps show these
-   per-bin numbers or any gene on the H&E image, in one, two or four linked panels; the gene list of a section is
-   ranked by UMIs, searchable, and puts a gene on the map (or as an overlay) in one click.
+3. **Explore** (or click the bin count of a section in the Data tab): read the raw data before running anything,
+   with the settings as they are (saved or not). A table gives the bins, genes and UMIs of each section, the median
+   UMIs, genes and mitochondrial share per bin and the bins that pass the quality control of the Parameters tab; the
+   maps show these per-bin numbers or any gene on the H&E image, in one, two or four linked panels; the gene list of
+   a section is ranked by UMIs and searchable: click a gene to put it on the map, or its layers button to add it as
+   an overlay.
 4. **Parameters** and **Signatures**: the defaults are the manuscript setup; every value has a help text and a
    reset button. Gene signatures (Table 1) can be edited, added, renamed or removed (see
    [Using it for other gene groups](#using-it-for-other-gene-groups)).
 5. **Region of interest** (optional): draw polygons on the H&E image of each section (D draw, Enter close, Esc cancel,
    Backspace remove a corner, Del remove the polygon, Ctrl+Z undo, Ctrl+S save) and switch on "Use the drawn region".
 6. **Run → Start analysis**. The run page shows each step, the live log, then the summary, figures (PNG/PDF), tables
-   (sortable, searchable, downloadable), a spatial viewer of every bin (tissue classes, calls, Leiden domains or any
-   gene; one, two or four linked panels, overlays of calls, region and genes, H&E underneath) and the exact
-   configuration used.
+   (sortable, searchable, downloadable; **Export** at the top downloads all results, the figures or the tables as
+   one zip), a spatial viewer of every bin (tissue classes, calls, Leiden domains or any gene; one, two or four
+   linked panels, overlays of calls, region and genes, H&E underneath) and the exact configuration used.
 
 Runs, projects and drawn regions are stored in `workspace/` (or `--workspace`, or the `BSS_WORKSPACE` variable).
 Each run keeps a frozen copy of its configuration, so it can be reproduced with **Re-run**.
@@ -98,7 +99,7 @@ with any signatures.
 
 ## Viewing results in Loupe Browser
 
-**Export for Loupe Browser** (Tables tab of a finished run) downloads `<run>_loupe.zip`: the run's per-bin calls as
+**Export → Loupe Browser** (at the top of a finished run) downloads `<run>_loupe.zip`: the run's per-bin calls as
 category files for 10x Genomics Loupe Browser, one CSV per section and bin size, and a README.txt that says which file
 goes with which `.cloupe` file.
 

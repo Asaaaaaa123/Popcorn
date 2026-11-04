@@ -57,6 +57,23 @@ function downloadLink(runId, file, label = 'Download') {
     icon('download', { size: 14 }), label);
 }
 
+/**
+ * One file of a list (data objects, other files) as a single download link: the whole row downloads the file, so the
+ * list needs no button per file. titled: show the title and description above the path.
+ */
+function fileRow(runId, o, { titled = true } = {}) {
+  const size = o.size !== null && o.size !== undefined ? ` · ${fmt.bytes(o.size)}` : '';
+  return h('li', null, h('a', {
+    class: 'tv-file', href: fileUrl(runId, o.file, true), download: String(o.file).split('/').pop(), title: `Download ${o.file}`,
+  },
+  h('span', { class: 'tv-file-main' },
+    h('span', { class: 'sr-only' }, 'Download '),
+    titled ? h('span', { class: 'tv-item-title' }, o.title || o.file) : null,
+    h('span', { class: 'tv-item-file' }, o.file, size),
+    titled && o.description ? h('span', { class: 'tv-item-desc' }, o.description) : null),
+  icon('download', { size: 15, cls: 'tv-file-icon' })));
+}
+
 /** One table, fetched a page at a time. state = {q, sort, desc, offset}, kept by the caller between visits. */
 function tableView({ runId, table, state }) {
   let destroyed = false;
@@ -275,21 +292,13 @@ export function tableBrowser({ runId, manifest, store }) {
   }
 
   const objectsCard = objects.length ? card({
-    title: 'Data objects', subtitle: 'AnnData and other files for further analysis',
-    body: h('ul', { class: 'tv-files' }, objects.map((o) => h('li', null,
-      h('div', { class: 'tv-file-main' },
-        h('div', { class: 'tv-item-title' }, o.title || o.file),
-        h('div', { class: 'tv-item-file' }, o.file, o.size !== null && o.size !== undefined ? ` · ${fmt.bytes(o.size)}` : ''),
-        o.description ? h('div', { class: 'tv-item-desc' }, o.description) : null),
-      downloadLink(runId, o.file)))),
+    title: 'Data objects', subtitle: 'AnnData and other files for further analysis; click one to download it',
+    body: h('ul', { class: 'tv-files' }, objects.map((o) => fileRow(runId, o))),
   }) : null;
 
   const otherBlock = other.length ? h('details', { class: 'card tv-other' },
     h('summary', null, `Other files (${other.length})`),
-    h('ul', { class: 'tv-files' }, other.map((o) => h('li', null,
-      h('div', { class: 'tv-file-main' }, h('div', { class: 'tv-item-file' }, o.file,
-        o.size !== null && o.size !== undefined ? ` · ${fmt.bytes(o.size)}` : '')),
-      downloadLink(runId, o.file))))) : null;
+    h('ul', { class: 'tv-files' }, other.map((o) => fileRow(runId, o, { titled: false })))) : null;
 
   const side = h('div', { class: 'tv-side' },
     tables.length ? card({ title: 'Tables', subtitle: `${tables.length} CSV file${tables.length === 1 ? '' : 's'}`, flush: true, body: h('div', null, filter ? h('div', { class: 'tv-filter-box' }, filter) : null, listEl) }) : null,

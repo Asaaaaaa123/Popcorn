@@ -1,7 +1,6 @@
 // sample-editor.js — the Data tab's sample table, the dialog that turns detected Space Ranger folders into samples,
 // and the panel that shows the data-check report (POST /api/projects/{pid}/validate).
-import { h, mount, icon, button, modal, banner, fmt, api } from '../core.js';
-import { iconButton } from './chips.js';
+import { h, mount, icon, button, menuButton, modal, banner, fmt, api } from '../core.js';
 import { openFolderPicker } from './folder-picker.js';
 
 export const SAMPLE_COLORS = ['#4C72B0', '#C44E52', '#55A868', '#8172B2', '#CCB974', '#64B5CD', '#DD8452', '#937860',
@@ -120,8 +119,9 @@ function moveMaskKey(cfg, from, to) {
 // ------------------------------------------------------------------------------------------------ sample table
 /**
  * Editable table of cfg.samples. Edits change `cfg` in place and call onChange(); add, remove and reorder rebuild
- * the rows. setReport(report) colors the rows with a data-check report; render() rebuilds after outside changes.
- * onExplore(sampleId), when given, adds an Explore button to every section the report found.
+ * the rows (reorder and removal are in each row's "Sample actions" menu). setReport(report) colors the rows with a
+ * data-check report; render() rebuilds after outside changes. onExplore(sampleId), when given, turns the bin count of
+ * every section the report found into a link to that section in the Explore tab.
  */
 export function sampleEditor({ cfg, report = null, onChange, onExplore } = {}) {
   const uid = `smp-${++editorSeq}`;
@@ -137,7 +137,7 @@ export function sampleEditor({ cfg, report = null, onChange, onExplore } = {}) {
         h('th', null, 'Id'), h('th', null, 'Label'), h('th', null, 'Condition'), h('th', null, 'Color'),
         h('th', null, 'Folder (relative to the data root)'),
         h('th', { title: 'Microns per full-resolution pixel. Empty: read from spatial/scalefactors_json.json' }, 'µm / px'),
-        h('th', null, 'Data'), h('th', null, h('span', { class: 'sr-only' }, 'Order and removal')))),
+        h('th', null, 'Data'), h('th', { class: 'col-actions' }, h('span', { class: 'sr-only' }, 'Actions')))),
       tbody)),
     h('div', { class: 'sample-foot' }, addBtn,
       h('span', { class: 'muted small' }, 'The reference sample (Ref.) is the denominator of every fold change and ratio of ratios.')));
@@ -167,17 +167,18 @@ export function sampleEditor({ cfg, report = null, onChange, onExplore } = {}) {
       return;
     }
     const found = !!rep.bin_dir;
-    let explore = null;
+    const detail = rep.message || (found ? rep.bin_dir : 'Not found');
+    const text = found ? (rep.n_bins !== null && rep.n_bins !== undefined ? `${fmt.int(rep.n_bins)} bins` : 'Found') : 'Not found';
     if (found && onExplore) {
-      explore = button({ label: 'Explore', icon: 'eye', small: true, kind: 'ghost', onClick: () => onExplore(r.s.id) });
-      explore.title = 'Look at the data of this section: summary, maps of UMIs, quality control and any gene, gene list';
-      explore.setAttribute('aria-label', `Explore the data of section ${r.s.id}`);
+      // the status of a section that was found is the way into the Explore tab (no separate button per row)
+      mount(r.status, h('button', {
+        type: 'button', class: 'state ok sample-explore', title: `Explore this section\n${detail}`,
+        'aria-label': `${text}: explore section ${r.s.id}`,
+        onClick: () => onExplore(r.s.id),
+      }, icon('check', { size: 13 }), text, icon('chevron-right', { size: 12, cls: 'sample-explore-go' })));
+      return;
     }
-    mount(r.status, h('div', { class: 'sample-status-row' },
-      h('span', { class: `state ${found ? 'ok' : 'bad'}`, title: rep.message || (found ? rep.bin_dir : 'Not found') },
-        icon(found ? 'check' : 'alert', { size: 13 }),
-        found ? (rep.n_bins !== null && rep.n_bins !== undefined ? `${fmt.int(rep.n_bins)} bins` : 'Found') : 'Not found'),
-      explore));
+    mount(r.status, h('span', { class: `state ${found ? 'ok' : 'bad'}`, title: detail }, icon(found ? 'check' : 'alert', { size: 13 }), text));
   }
 
   async function browse(s, pathInput) {
@@ -215,9 +216,18 @@ export function sampleEditor({ cfg, report = null, onChange, onExplore } = {}) {
     browseBtn.setAttribute('aria-label', `Browse for the folder of sample ${i + 1}`);
     const mpp = h('input', { class: 'input num', type: 'number', min: 0, step: 'any', value: s.microns_per_pixel ?? '', placeholder: 'auto', 'aria-label': `Sample ${i + 1}: microns per pixel` });
     const status = h('td', { class: 'sample-status' });
-    const up = iconButton('chevron-up', `Move sample ${i + 1} up`, () => move(i, -1), { disabled: i === 0 });
-    const down = iconButton('chevron-down', `Move sample ${i + 1} down`, () => move(i, 1), { disabled: i === n - 1 });
-    const remove = iconButton('trash', `Remove sample ${i + 1}`, () => removeAt(i), { cls: 'danger-hover' });
+    // reorder and removal: one menu per row, revealed on hover or focus (the rows are rebuilt after each change, so
+    // i and n stay right for the life of this row)
+    const menu = menuButton({
+      small: true, title: 'Sample actions',
+      items: () => [
+        { label: 'Move up', icon: 'chevron-up', disabled: i === 0, onClick: () => move(i, -1) },
+        { label: 'Move down', icon: 'chevron-down', disabled: i === n - 1, onClick: () => move(i, 1) },
+        'separator',
+        { label: 'Remove sample', icon: 'trash', danger: true, onClick: () => removeAt(i) },
+      ],
+    });
+    menu.setAttribute('aria-label', `Sample actions: ${name()}`);
 
     radio.addEventListener('change', () => { if (radio.checked) { cfg.reference_sample = s.id; emit(); } });
     idInput.addEventListener('input', () => {
@@ -226,6 +236,7 @@ export function sampleEditor({ cfg, report = null, onChange, onExplore } = {}) {
       if (radio.checked) cfg.reference_sample = s.id;
       moveMaskKey(cfg, old, s.id);
       radio.setAttribute('aria-label', `Reference sample: ${name()}`);
+      menu.setAttribute('aria-label', `Sample actions: ${name()}`);
       pathInput.placeholder = s.id ? `${s.id} (default)` : '';
       checkIds();
       paintStatus(ref);
@@ -260,11 +271,12 @@ export function sampleEditor({ cfg, report = null, onChange, onExplore } = {}) {
       h('td', { class: 'col-path' }, h('div', { class: 'input-group' }, pathInput, browseBtn)),
       h('td', { class: 'col-mpp' }, mpp),
       status,
-      h('td', { class: 'col-actions' }, h('div', { class: 'row nowrap' }, up, down, remove)));
-    const ref = { s, tr, radio, idInput, mpp, status, up, down, remove };
+      h('td', { class: 'col-actions' }, h('span', { class: 'row-actions' }, menu)));
+    const ref = { s, tr, radio, idInput, mpp, status, menu };
     return ref;
   }
 
+  /** Rebuild the rows; focus: {index, control} names the control to focus afterwards ('idInput' or 'menu'). */
   function render(focus) {
     if (!Array.isArray(cfg.samples)) cfg.samples = [];
     const n = cfg.samples.length;
@@ -277,8 +289,7 @@ export function sampleEditor({ cfg, report = null, onChange, onExplore } = {}) {
     const r = refs[focus.index];
     if (!r) { addBtn.focus(); return; }
     const target = r[focus.control];
-    if (target && !target.disabled) target.focus();
-    else if (focus.control === 'up' || focus.control === 'down') (focus.control === 'up' ? r.down : r.up).focus();
+    if (target) target.focus();
   }
 
   function move(i, delta) {
@@ -286,7 +297,8 @@ export function sampleEditor({ cfg, report = null, onChange, onExplore } = {}) {
     const j = i + delta;
     if (j < 0 || j >= list.length) return;
     [list[i], list[j]] = [list[j], list[i]];
-    render({ index: j, control: delta < 0 ? 'up' : 'down' });
+    // the focus follows the moved sample: its menu button, in its new row
+    render({ index: j, control: 'menu' });
     emit();
   }
 
@@ -296,7 +308,7 @@ export function sampleEditor({ cfg, report = null, onChange, onExplore } = {}) {
       const next = cfg.samples.find((s) => s.condition === 'control') || cfg.samples[0];
       cfg.reference_sample = next ? next.id : '';
     }
-    render({ index: Math.min(i, cfg.samples.length - 1), control: 'remove' });
+    render({ index: Math.min(i, cfg.samples.length - 1), control: 'menu' });
     emit();
   }
 
@@ -409,7 +421,7 @@ function listBanner(kind, title, items) {
 /**
  * The data-check report: errors and warnings, one row per sample (found, folder, bin sizes, bins, microns per pixel,
  * H&E image) and gene coverage (signatures with genes missing from the probe set, receptor panel, adipocyte genes).
- * onExplore(), when given, adds a pointer to the Explore tab once a section was found.
+ * onExplore(), when given, adds a pointer to the Explore tab (a text link) once a section was found.
  */
 export function reportPanel({ report, cfg, checking = false, stale = false, error = null, checkedAt = null, onExplore } = {}) {
   const status = checking
@@ -424,9 +436,9 @@ export function reportPanel({ report, cfg, checking = false, stale = false, erro
 
   if (onExplore && (report.samples || []).some((s) => s.bin_dir)) {
     parts.push(h('div', { class: 'report-explore' }, icon('eye', { size: 16 }),
-      h('span', null, h('strong', null, 'Read the data before any run. '),
-        'The Explore tab shows each section: bins, genes, UMIs and quality control, maps of them and of any gene on the H&E image, and the genes ranked by UMIs.'),
-      button({ label: 'Explore the data', icon: 'eye', small: true, onClick: () => onExplore() })));
+      h('span', null, h('strong', null, 'Read the data before any run. '), 'The ',
+        h('button', { type: 'button', class: 'linklike', title: 'Open the Explore tab', onClick: () => onExplore() }, 'Explore tab'),
+        ' shows each section: bins, genes, UMIs and quality control, maps of them and of any gene on the H&E image, and the genes ranked by UMIs. The bin count of a section in the table above opens that section there.')));
   }
 
   const errors = report.errors || [];

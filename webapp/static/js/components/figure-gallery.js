@@ -1,6 +1,6 @@
 // figure-gallery.js — the Figures tab of a run: the figures of figures/manifest.json grouped as in the manuscript,
 // with lazily loaded thumbnails and a full-size viewer (fit or 1:1, PNG / PDF download, previous / next with the
-// arrow keys).
+// arrow keys). A card has no buttons of its own: clicking it opens the viewer, which has the downloads of the figure.
 import { h, mount, icon, modal, banner } from '../core.js';
 
 function downloadUrl(url) {
@@ -11,16 +11,20 @@ function downloadUrl(url) {
 
 function downloadButton(url, label) {
   if (!url) return null;
-  return h('a', { class: 'btn small', href: downloadUrl(url), download: '', title: `Download ${label}` },
-    icon('download', { size: 13 }), label);
+  return h('a', {
+    class: 'btn small', href: downloadUrl(url), download: '', title: `Download the ${label}`, 'aria-label': `Download ${label}`,
+  }, icon('download', { size: 13 }), label);
 }
 
 function brokenImage(text) {
   return h('div', { class: 'fg-broken' }, icon('image', { size: 22 }), h('span', null, text));
 }
 
-/** figureGallery({figures}) -> {el, destroy()}; figures = the "figures" list of GET /api/runs/<id>/manifest. */
-export function figureGallery({ figures }) {
+/**
+ * figureGallery({figures, actions}) -> {el, destroy()}; figures = the "figures" list of GET /api/runs/<id>/manifest;
+ * actions = optional nodes shown at the right of the gallery's top line (e.g. a "Download all" button).
+ */
+export function figureGallery({ figures, actions = null }) {
   const groups = new Map();
   for (const f of Array.isArray(figures) ? figures : []) {
     if (!f || !(f.name || f.title)) continue;
@@ -49,13 +53,20 @@ export function figureGallery({ figures }) {
       });
       thumb.append(img);
     }
-    return h('article', { class: f.error ? 'fg-card has-error' : 'fg-card' },
-      thumb,
-      h('div', { class: 'fg-info' },
-        h('div', { class: 'fg-title' }, title),
-        f.error ? h('div', { class: 'fg-error' }, String(f.error)) : null,
-        !f.error && f.caption ? h('div', { class: 'fg-caption' }, f.caption) : null,
-        h('div', { class: 'fg-links' }, downloadButton(f.png_url, 'PNG'), downloadButton(f.pdf_url, 'PDF'))));
+    // the whole card opens the viewer for the mouse; the thumbnail is the button for the keyboard and screen readers
+    return h('article', {
+      class: f.error ? 'fg-card has-error' : 'fg-card',
+      onClick: (e) => {
+        if (e.target instanceof Element && e.target.closest('a, button')) return;
+        if (window.getSelection && String(window.getSelection()).trim()) return; // selecting caption text
+        open(index, thumb);
+      },
+    },
+    thumb,
+    h('div', { class: 'fg-info' },
+      h('div', { class: 'fg-title' }, title),
+      f.error ? h('div', { class: 'fg-error' }, String(f.error)) : null,
+      !f.error && f.caption ? h('div', { class: 'fg-caption' }, f.caption) : null));
   }
 
   function open(start, returnFocus) {
@@ -64,7 +75,7 @@ export function figureGallery({ figures }) {
     const stage = h('div', { class: 'fg-stage fit' });
     const caption = h('div', { class: 'fg-modal-caption' });
     const counter = h('span', { class: 'fg-counter' });
-    const links = h('div', { class: 'row' });
+    const links = h('div', { class: 'fg-downloads', role: 'group', 'aria-label': 'Download this figure' });
     const navButton = (iconName, title, step) => h('button', {
       class: 'btn small icon-only', type: 'button', title, 'aria-label': title, onClick: () => show(i + step),
     }, icon(iconName, { size: 15 }));
@@ -125,7 +136,9 @@ export function figureGallery({ figures }) {
         mount(stage, h('button', { class: 'fg-zoom', type: 'button', title: 'Click to switch between fit and actual size', onClick: toggleZoom }, img));
       }
       mount(caption, f.caption ? String(f.caption) : null);
-      mount(links, downloadButton(f.png_url, 'PNG'), downloadButton(f.pdf_url, 'PDF'));
+      const png = downloadButton(f.png_url, 'PNG');
+      const pdf = downloadButton(f.pdf_url, 'PDF');
+      mount(links, png || pdf ? h('span', { class: 'fg-downloads-label', 'aria-hidden': 'true' }, 'Download') : null, png, pdf);
       const ahead = ordered[i + 1];
       if (ahead && ahead.png_url && !ahead.error) new Image().src = ahead.png_url; // warm the cache for "next"
     }
@@ -137,7 +150,11 @@ export function figureGallery({ figures }) {
 
   const failed = ordered.filter((f) => f.error).length;
   let index = 0;
+  const n = ordered.length;
   const el = h('div', { class: 'fg' },
+    h('div', { class: 'fg-bar' },
+      h('p', { class: 'fg-bar-text' }, `${n} figure${n === 1 ? '' : 's'}. Click a figure to see it full size and download it as PNG or PDF.`),
+      actions ? h('div', { class: 'fg-bar-actions' }, actions) : null),
     failed ? banner('warning', `${failed} figure${failed === 1 ? '' : 's'} could not be drawn; the card${failed === 1 ? ' shows' : 's show'} the reason. The other figures are complete.`) : null,
     [...groups.entries()].map(([name, figs]) => h('section', { class: 'fg-group' },
       h('h3', { class: 'fg-group-title' }, name, h('span', { class: 'fg-group-count' }, String(figs.length))),

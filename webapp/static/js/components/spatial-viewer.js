@@ -1028,8 +1028,11 @@ export function spatialViewer({ source, store, binUm: binUmOption, emptyText }) 
         },
       }), opacity));
   }
-  const saveBtn = h('button', { class: 'btn small', type: 'button', onClick: savePng, disabled: true },
-    icon('download', { size: 14 }), 'Save PNG');
+  // a quiet button at the end of the toolbar: the viewer's controls come first
+  const saveBtn = h('button', {
+    class: 'btn small ghost sv-save', type: 'button', onClick: savePng, disabled: true,
+    title: 'Save the panels, with their legends, as a PNG image',
+  }, icon('download', { size: 14 }), 'Save PNG');
   const toolbar = h('div', { class: 'sv-toolbar' },
     h('div', { class: 'sv-control sv-control-auto' },
       h('span', { class: 'sv-control-label' }, 'Panels'),
@@ -1505,9 +1508,10 @@ export function spatialViewer({ source, store, binUm: binUmOption, emptyText }) 
     // placed in the window (position: fixed) next to the pointer, so that the edges of a small panel do not cut it
     const tip = h('div', { class: 'sv-tip', hidden: true, role: 'tooltip' });
     const msg = h('div', { class: 'sv-msg', hidden: true });
-    const zoomBtn = (iconName, title, onClick) => h('button', { class: 'btn small icon-only', type: 'button', title, 'aria-label': title, onClick }, icon(iconName, { size: 15 }));
+    // compact icon buttons in one floating group on the map (run.css), named by aria-label and explained by title
+    const zoomBtn = (iconName, title, onClick) => h('button', { class: 'btn small ghost icon-only', type: 'button', title, 'aria-label': title, onClick }, icon(iconName, { size: 14 }));
     const stage = h('div', { class: 'sv-stage' }, canvas,
-      h('div', { class: 'sv-zoom' },
+      h('div', { class: 'sv-zoom', role: 'group', 'aria-label': 'Zoom' },
         zoomBtn('zoom-in', 'Zoom in (+)', () => zoomBy(1.6)),
         zoomBtn('zoom-out', 'Zoom out (−)', () => zoomBy(1 / 1.6)),
         zoomBtn('maximize', 'Fit (0); linked views fit every panel\'s section', fit)),

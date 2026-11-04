@@ -1,6 +1,7 @@
 // param-form.js — the Parameters tab: one card per PARAM_SCHEMA section (a control per field type, inline invalid
-// state, reset to the default), then proximity pairs, figure options, analysis steps (with the help of the schema's
-// "steps" section) and reproducibility. Every edit changes the draft configuration in place and calls onChange().
+// state, reset to the default), plus proximity pairs, figure options, analysis steps (with the help of the schema's
+// "steps" section) and reproducibility, in the groups of the links on the left (Analysis, Figures, Sensitivity
+// analyses, Other). Every edit changes the draft configuration in place and calls onChange().
 import { h, mount, icon, card, switchToggle, button, clone } from '../core.js';
 import { chipInput, chipSelect, signatureOptions, optionLabel, iconButton, parseTokens, uniqueList } from './chips.js';
 
@@ -242,8 +243,9 @@ function makeField(spec, acc, ctx) {
   };
 }
 
-function section(title, subtitle, body, actions) {
-  return { title, el: card({ title, subtitle, body, actions, cls: 'pf-card' }) };
+/** A card of the form; key = the PARAM_SCHEMA key, or the configuration path an extra card edits (it places the link). */
+function section(key, title, subtitle, body, actions) {
+  return { key, title, el: card({ title, subtitle, body, actions, cls: 'pf-card' }) };
 }
 
 // ------------------------------------------------------------------------------------------------ extra cards
@@ -273,13 +275,15 @@ function pairsSection(ctx) {
         [['assignment', 'tissue assignment'], ['positivity', 'positivity calls']].map(([v, t]) => h('option', { value: v, selected: p.mode === v }, t)),
         ['assignment', 'positivity'].includes(p.mode) ? null : h('option', { value: p.mode ?? '', selected: true }, `${p.mode} (not supported)`));
       mode.addEventListener('change', () => { p.mode = mode.value; ctx.onChange(); });
+      // the remove button shows on hover or focus (.row-actions), so the table is not a column of trash icons
       return h('tr', null,
         h('td', null, sigSelect(p, 'from', `Pair ${i + 1}: from`, paintFile)),
         h('td', { class: 'center muted' }, icon('chevron-right', { size: 14 })),
         h('td', null, sigSelect(p, 'to', `Pair ${i + 1}: to`, paintFile)),
         h('td', null, mode),
         file,
-        h('td', { class: 'right' }, iconButton('trash', `Remove pair ${i + 1}`, () => { list.splice(i, 1); ctx.onChange(); paint(true); })));
+        h('td', { class: 'right' }, h('span', { class: 'row-actions' },
+          iconButton('trash', `Remove pair ${i + 1}`, () => { list.splice(i, 1); ctx.onChange(); paint(true); }))));
     });
     const add = button({
       label: 'Add pair', icon: 'plus', small: true,
@@ -298,7 +302,7 @@ function pairsSection(ctx) {
     if (focusAdd) add.focus();
   };
   paint();
-  return section('Proximity pairs', 'One table per pair: how many “from” bins have a “to” bin within the radius set under '
+  return section('proximity.pairs', 'Proximity pairs', 'One table per pair: how many “from” bins have a “to” bin within the radius set under '
     + 'Proximity tables, counted by the tissue assignment or by the positivity calls.', body);
 }
 
@@ -334,9 +338,10 @@ function panelsEditor(ctx, onPanelsChange) {
         emptyText: 'No signature: this panel is not drawn',
         onChange: (v) => { p.signatures = v; changed(); },
       });
-      return h('div', { class: 'pf-panel' },
+      return h('div', { class: 'pf-panel has-row-actions' },
         h('div', { class: 'pf-panel-head' }, input,
-          iconButton('trash', `Remove positivity panel ${p.name || i + 1}`, () => { list.splice(i, 1); changed(); paint(); })),
+          h('span', { class: 'row-actions' },
+            iconButton('trash', `Remove positivity panel ${p.name || i + 1}`, () => { list.splice(i, 1); changed(); paint(); }))),
         sigs.el);
     });
     const add = button({
@@ -396,7 +401,7 @@ function figuresSection(ctx) {
       makeField(lineageSpec('a', 'Figure 4a–f: first signature (blue)'), lineage('a'), ctx).el,
       makeField(lineageSpec('b', 'Figure 4a–f: second signature (red)'), lineage('b'), ctx).el,
       FIGURE_FIELDS.map((f) => makeField(f, fig(f.key), ctx).el)));
-  return section('Figures', 'What bone_figures.py draws after the analysis.', body);
+  return section('figures', 'Figures', 'What bone_figures.py draws after the analysis.', body);
 }
 
 /** stepFields: the fields of the schema's "steps" section ({key, help, study}), the help shown under each switch. */
@@ -429,14 +434,129 @@ function stepsSection(ctx, stepLabels, stepFields) {
   };
   const syncRestore = () => restore.classList.toggle('hidden', same(obj(ctx.cfg, 'steps'), defaults));
   paint();
-  return section('Analysis steps', 'Steps that are switched off are skipped; their tables and figures are not written. '
+  return section('steps', 'Analysis steps', 'Steps that are switched off are skipped; their tables and figures are not written. '
     + 'Steps marked “bone study” are specific to the bone-lesion study of the manuscript: for other tissues, point '
     + 'their settings at your own signatures or switch them off. The Run tab can switch the slow steps for a single run.', grid, restore);
 }
 
 function reproSection(ctx) {
-  return section('Reproducibility', null, h('div', { class: 'form-grid pf-grid' },
+  return section('reproducibility', 'Reproducibility', null, h('div', { class: 'form-grid pf-grid' },
     REPRO_FIELDS.map((f) => makeField(f, accessor(ctx, null, f.key), ctx).el)));
+}
+
+// ------------------------------------------------------------------------------------------------ section links
+// The left column lists the cards in groups. A card is placed by its key (the PARAM_SCHEMA key, or the configuration
+// path an extra card edits); the cards of the second review are recognised by their key or, failing that, by their
+// title, and are listed without the common "Sensitivity analyses:" prefix (the card keeps its full title). Any other
+// card (Reproducibility, or a section added to the schema later) goes to "Other", so that every card has a link.
+const SENSITIVITY_KEY = 'sensitivity_analyses';
+const SENSITIVITY_TITLE_RE = /^\s*sensitivity analyses\s*:\s*/i;
+const isSensitivity = (s) => s.key === SENSITIVITY_KEY || String(s.key ?? '').startsWith(`${SENSITIVITY_KEY}.`)
+  || SENSITIVITY_TITLE_RE.test(String(s.title ?? ''));
+const NAV_GROUPS = [
+  { label: 'Analysis', keys: ['qc', 'clustering', 'scoring', 'roi'] },
+  { label: 'Figures', keys: ['compartments', 'uncoupling', 'proximity', 'moran', 'proximity.pairs', 'figures', 'steps'] },
+  { label: 'Sensitivity analyses', match: isSensitivity, shortTitles: true },
+  { label: 'Other', match: () => true },
+];
+// a click on a link keeps it current until the user scrolls, clicks or types (a short last card never reaches the top)
+const UNPIN_EVENTS = ['wheel', 'touchstart', 'pointerdown', 'keydown'];
+
+/** "Sensitivity analyses: general" -> "General"; a title without the prefix is returned as it is. */
+function shortTitle(title) {
+  const text = String(title ?? '');
+  const m = SENSITIVITY_TITLE_RE.exec(text);
+  const rest = m ? text.slice(m[0].length).trim() : '';
+  return rest ? rest.charAt(0).toUpperCase() + rest.slice(1) : text;
+}
+
+/** The cards in navigation groups, in NAV_GROUPS order and their own order within a group; empty groups left out. */
+function groupSections(sections) {
+  const groups = NAV_GROUPS.map((g) => ({ ...g, sections: [] }));
+  for (const s of sections) groups.find((g) => (g.keys ? g.keys.includes(s.key) : g.match(s))).sections.push(s);
+  return groups.filter((g) => g.sections.length);
+}
+
+/**
+ * The grouped links to the cards (`ordered` = the cards in page order). The link of the first card in the top third
+ * of the window is marked current (aria-current); a click scrolls to the card and focuses its first control.
+ */
+function sectionNav(groups, ordered) {
+  const links = new Map();
+  let current = null;
+  let nav = null;
+  const setCurrent = (s) => {
+    if (!s || s === current) return;
+    if (current) links.get(current).removeAttribute('aria-current');
+    current = s;
+    const link = links.get(s);
+    link.setAttribute('aria-current', 'location');
+    // in a short window the column scrolls: keep the current link in it (the nav is the links' offsetParent, being
+    // sticky; scrollIntoView() is not used, since it would stop a smooth scroll of the page under way)
+    if (nav && nav.scrollHeight > nav.clientHeight) {
+      const top = link.offsetTop;
+      const bottom = top + link.offsetHeight;
+      if (top < nav.scrollTop) nav.scrollTop = Math.max(0, top - 28);
+      else if (bottom > nav.scrollTop + nav.clientHeight) nav.scrollTop = bottom - nav.clientHeight + 8;
+    }
+  };
+  let pinned = false;
+  const unpin = () => {
+    pinned = false;
+    UNPIN_EVENTS.forEach((t) => window.removeEventListener(t, unpin, true));
+  };
+  const pin = () => {
+    if (!pinned) UNPIN_EVENTS.forEach((t) => window.addEventListener(t, unpin, { capture: true, passive: true }));
+    pinned = true;
+  };
+  const go = (s) => {
+    setCurrent(s);
+    s.el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    // the first visible control (a hidden "Default panels" or "Restore defaults" button cannot take the focus)
+    const first = [...s.el.querySelectorAll('input, select, button.btn')].find((c) => !c.disabled && c.offsetParent !== null);
+    if (first) first.focus({ preventScroll: true });
+    pin();
+  };
+  nav = h('nav', { class: 'pf-nav', 'aria-label': 'Parameter sections' }, groups.map((g) => {
+    const labelId = nextId('pfg');
+    return h('div', { class: 'pf-nav-group', role: 'group', 'aria-labelledby': labelId },
+      h('div', { class: 'pf-nav-label', id: labelId }, g.label),
+      h('div', { class: 'pf-nav-list' }, g.sections.map((s) => {
+        const text = g.shortTitles ? shortTitle(s.title) : s.title;
+        const link = h('button', { type: 'button', class: 'pf-nav-item', title: text !== s.title ? s.title : null, onClick: () => go(s) }, text);
+        links.set(s, link);
+        return link;
+      })));
+  }));
+
+  // scroll spy: the cards crossing the band from 16 px (the sticky offset) to a third of the window's height
+  const byEl = new Map(ordered.map((s) => [s.el, s]));
+  const inBand = new Set();
+  const observers = [];
+  let attached = false;
+  // false once the tab has closed (the cards left the page): the observers stop, since an observer that still has
+  // targets keeps them (the whole old form) in memory
+  const live = () => {
+    if (nav.isConnected) attached = true;
+    else if (attached) { observers.forEach((o) => o.disconnect()); unpin(); return false; }
+    return true;
+  };
+  if (typeof IntersectionObserver === 'function') {
+    observers.push(new IntersectionObserver((entries) => {
+      if (!live()) return;
+      for (const e of entries) {
+        const s = byEl.get(e.target);
+        if (e.isIntersecting) inBand.add(s); else inBand.delete(s);
+      }
+      if (!pinned) setCurrent(ordered.find((s) => inBand.has(s)));
+    }, { rootMargin: '-16px 0px -66% 0px' }));
+    // the band may hold no card when the tab closes (top of the page in a short window, check panel open): a card
+    // still in the window then reports leaving it
+    observers.push(new IntersectionObserver(() => { live(); }));
+    ordered.forEach((s) => observers.forEach((o) => o.observe(s.el)));
+  }
+  setCurrent(ordered[0]);
+  return nav;
 }
 
 /**
@@ -451,18 +571,12 @@ export function paramForm({ cfg, defaults, schema, stepLabels, onChange }) {
     const extra = FIELD_EXTRAS[`${sec.key}.${f.key}`];
     return makeField(extra ? { ...f, ...extra(ctx) } : f, accessor(ctx, sec.key, f.key), ctx).el;
   };
-  const sections = (schema || []).filter((sec) => sec !== stepSpec).map((sec) => section(sec.title, sec.description,
+  const sections = (schema || []).filter((sec) => sec !== stepSpec).map((sec) => section(sec.key, sec.title, sec.description,
     h('div', { class: 'form-grid pf-grid' }, (sec.fields || []).map((f) => field(sec, f)))));
   sections.push(pairsSection(ctx), figuresSection(ctx), stepsSection(ctx, ctx.stepLabels, stepSpec && stepSpec.fields),
     reproSection(ctx));
-  const nav = h('nav', { class: 'pf-nav', 'aria-label': 'Parameter sections' },
-    sections.map((s) => h('button', {
-      type: 'button', class: 'pf-nav-item',
-      onClick: () => {
-        s.el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-        const first = s.el.querySelector('input, select, button.btn');
-        if (first) first.focus({ preventScroll: true });
-      },
-    }, s.title)));
-  return { el: h('div', { class: 'pf-layout' }, nav, h('div', { class: 'pf-cards' }, sections.map((s) => s.el))) };
+  // the cards follow the groups of the links, so that the links read in the order of the page
+  const groups = groupSections(sections);
+  const ordered = groups.flatMap((g) => g.sections);
+  return { el: h('div', { class: 'pf-layout' }, sectionNav(groups, ordered), h('div', { class: 'pf-cards' }, ordered.map((s) => s.el))) };
 }

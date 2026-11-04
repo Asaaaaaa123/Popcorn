@@ -399,7 +399,15 @@ GET  /api/runs/{rid}/export/loupe  -> application/zip, attachment "<rid>_loupe.z
      files for 10x Genomics Loupe Browser and README.txt (see "Loupe Browser export" below). 404 unknown run or no
      per-bin table (detail says when the run stopped before writing one); 409 while the run is queued or running; 422
      when a section's raw data can no longer be found or read, no bin of the table is a barcode of its matrix, a
-     section of the table is not in the run's config, or the run's bins are smaller than 8 µm (no .cloupe exists)
+     section of the table is not in the run's config, or the run's bins are smaller than 8 µm (no .cloupe exists).
+     The UI: "Loupe Browser" in the run page's Export menu
+GET  /api/runs/{rid}/export/results?part=all|figures|tables  -> application/zip, attachment "<rid>_results.zip",
+     "<rid>_figures.zip" or "<rid>_tables.zip" (server.results_zip): files at their paths under results/. figures =
+     figures/*.png and *.pdf; tables = every CSV/TSV (also gzipped); all = every result file except .h5ad objects (often
+     gigabytes; downloaded on their own from the Tables tab) plus run_config.json and run_log.txt. PNG, PDF and .gz
+     are stored, the rest deflated; built in a temporary file removed once sent. 400 unknown part; 404 unknown run or
+     nothing of that part (detail says when the run stopped before writing any); 409 while queued or running. The UI:
+     "All results", "Figures" and "Tables" in the run page's Export menu; "Download all" of the Figures tab (figures)
 
 POST /api/demo                  -> {"project": project}   generates workspace/demo_data (once; ~1 min) with
                                    tools.make_demo_data.generate and creates a project "Demo — synthetic tibiae"
@@ -473,13 +481,27 @@ printed with the URL); requests carry it as cookie `bss_token` (set by visiting 
 
 ## 7. Front end (webapp/static, ES modules, no framework, no network dependencies)
 `core.js` (already written — read it) provides: api(), apiUrl(), ApiError, h(), svg(), mount(), clear(), icon(),
-button(), card(), field(), switchToggle(), tabs(), statusBadge(), loading(), emptyState(), errorPanel(), banner(),
-toast(), modal(), confirmDialog(), promptDialog(), fmt.{int,num,pct,bytes,duration,date,ago}, debounce(), sleep(),
-poll(), copyText(), clone(), state.health, refreshHealth(), route(), navigate(), setPathSilently(), currentPath().
+button(), menuButton(), card(), field(), switchToggle(), tabs(), statusBadge(), loading(), emptyState(), errorPanel(),
+banner(), toast(), modal(), confirmDialog(), promptDialog(), fmt.{int,num,pct,bytes,duration,date,ago}, debounce(),
+sleep(), poll(), copyText(), clone(), state.health, refreshHealth(), route(), navigate(), setPathSilently(),
+currentPath().
+`menuButton({items, label, icon, kind, small, title, align, cls}) -> button`: a button (aria-haspopup="menu") that
+opens a role="menu" popover (.menu-pop) of items {label, icon, hint, onClick, href, download, target, danger, disabled,
+title} | 'separator' | {heading}; `items` may be a function, called at each opening. onClick may be async (a rejection
+becomes a toast); an item with href is a link (download: true or a file name saves the file). Without a label it is
+the ghost icon-only "More actions" button (aria-label = title), with one a button with a caret. One menu is open at a
+time; it follows its button while the page scrolls and closes on a choice, Escape, Tab, a click elsewhere, a resize or
+navigation, giving the focus back to its button; ↑/↓ on the button open it, ↑/↓/Home/End move in it; modal() leaves
+the keys to a menu open in a dialog.
+Convention for secondary and destructive actions (move, remove, duplicate, delete, reset): a menuButton, or
+`.row-actions`, a span in a table row or list item shown only while the row (tr, li, .has-row-actions) is hovered or
+holds the focus (always on touch screens, and while its menu is open; `.keep` keeps it shown, e.g. while a toggle in
+it is on). A row or card that opens something on click keeps a real link or button for the keyboard.
 `css/app.css` (already written — read it) defines the design system: .page, .page-header, .card, .btn (primary,
-danger, ghost, small, icon-only), .input/.select/.textarea, .field, .form-grid, .switch, .tabs, .badge(-status),
-.chip(.ok/.warn/.bad/.core), .table-wrap/.table, .kv, .metric, .progress, .log, .banner, .modal, .toast, .empty,
-.grid-2/.grid-3/.grid-auto, .row, .stack, .legend, .prose. Use them; put view-specific rules in css/project.css
+danger, ghost, ghost.danger, small, icon-only, toggle[aria-pressed]), .menu-pop/.menu-item (menuButton), .row-actions,
+.input/.select/.textarea, .field, .form-grid, .switch, .tabs, .badge(-status), .chip(.ok/.warn/.bad/.core),
+.table-wrap/.table, .kv, .metric, .progress, .log, .banner, .modal, .toast, .empty, .grid-2/.grid-3/.grid-auto, .row,
+.stack, .legend, .prose. Use them; put view-specific rules in css/project.css
 (projects, project editor, ROI editor, data explorer) or css/run.css (runs, results, viewers). The interface has one dark theme; its
 colors come from the CSS variables on `:root` only — never hard-code colors except data colors (signature/sample
 palettes).
@@ -488,16 +510,37 @@ Routes (main.js, already written) and the view modules they call — each export
 return a cleanup function (stop timers, remove listeners):
 ```
 #/projects                 views/projects.js  export async function renderProjects(container, {})
+                           one card per project: a click on it opens the project's Data tab (its name is the link);
+                           Duplicate and Delete project are in its "Project actions" menu (.row-actions). Header: Try
+                           the demo (ghost) and New project, hidden while there is no project (the intro has them)
 #/projects/:id/:tab?       views/project.js   export async function renderProject(container, {id, tab})
                            tabs: data | explore | parameters | signatures | roi | run
                            explore = dataExplorer() on the draft config (section "Data explorer" below)
+                           header: the configuration-check chip only (see "Signatures and Parameters tabs"); Save
+                           and Discard are in the bar at the bottom shown while there are unsaved changes (and
+                           Ctrl+S). data: the sample table (a row's "Sample actions" menu: Move up, Move down, Remove
+                           sample) and the Data check card ("Check again"). run: the project's runs (a click on a
+                           row opens the run) and a "See all runs" link to #/runs
 #/runs                     views/runs.js      export async function renderRuns(container, {})
+                           no Refresh button: polls GET /api/runs every 4 s while a run is queued or running (not
+                           while the page is hidden), refreshes when the window or tab is back and on the shell's
+                           health events. A click on a row opens the run; the last column has Cancel (queued or
+                           running) and the row's "Run actions" menu (Open project, Delete run), which a poll leaves
+                           open
 #/runs/:id/:tab?           views/run.js       export async function renderRun(container, {id, tab})
                            tabs: progress | summary | figures | tables | viewer | config  (tab null -> progress
-                           while queued/running, summary when finished); viewer = spatialViewer(runSource(id));
-                           tables of a finished run with a per-bin table: a "Loupe Browser" card above the table
-                           browser whose "Export for Loupe Browser" fetches GET /export/loupe and saves the zip, or
-                           shows the server's detail when the export is refused
+                           while queued/running, summary when finished); viewer = spatialViewer(runSource(id)).
+                           Header actions, built once (the menus read the run when they open): Cancel (only while
+                           queued or running), Export (menu: All results, Figures, Tables = GET /export/results;
+                           Loupe Browser = GET /export/loupe), Re-run, "Run actions" menu (Open project, Delete run;
+                           Delete disabled while active). An export item is disabled while the run is active, while
+                           that zip is being prepared, or when the manifest already fetched has nothing of its kind;
+                           the zip is fetched (not linked) and saved, and a refusal shows the server's detail in a
+                           toast. figures = figureGallery: a card has no buttons, a click opens the viewer (fit or
+                           1:1, previous / next, Download PNG / PDF); "Download all" in the gallery's top line = the
+                           figures zip. tables = tableBrowser; each data object and other file is one download link
+                           (.h5ad objects are in no zip). config: Copy and Download are icon-only buttons beside
+                           "Create project from this configuration"
 #/help/:topic?             views/help.js      export async function renderHelp(container, {topic})
                            topics: guide (default) | changes | architecture | readme
 ```
@@ -516,10 +559,25 @@ Components live in js/components/ and are imported by the views.
   Empty composition and panel lists say that the figure is not drawn; the Tumor conditions chips are marked when no
   section has that condition. The Analysis steps card shows each step's help and a "bone study" badge from the
   schema's "steps" section (the Run tab shows the help as the step's tooltip, and the badge).
-* The configuration-check chips at the top of the project page (and their panel) show the check of the unsaved
+* Signatures tab buttons: Delete signature is in the "Signature actions" menu at the head of the signature, "Reset gene
+  sets to manuscript defaults" in the "Gene set actions" menu of the Signatures card, beside Add (and in the empty
+  state, beside Add signature); both ask for confirmation. The move and remove buttons of the calling-order lists and
+  the tissue classes, and the remove buttons of excluded genes, receptor-panel rows, proximity pairs and positivity
+  panels, are .row-actions.
+* Parameters navigation: the section links on the left (hidden below 960 px) are grouped and the cards follow their
+  order: Analysis (qc, clustering, scoring, roi), Figures (compartments, uncoupling, proximity, moran, the proximity
+  pairs, figures, steps), Sensitivity analyses (key sensitivity_analyses[.*], or a title starting "Sensitivity
+  analyses:"; linked without that prefix), Other (Reproducibility and any section added to the schema later). The
+  link of the first card in the band from 16 px to a third of the window's height is current (aria-current=
+  "location"); a click scrolls to the card, focuses its first visible control and keeps that link current until the
+  next scroll, click or key.
+* The configuration-check chip, the one control in the header of the project page, shows the check of the unsaved
   settings while there are any: POST /validate with "data": false, 300 ms after the last change (aborted when another
-  follows), kept with the JSON of the config it checked; until it answers, and when it fails, they show the saved
-  settings' check and say so. The Run tab and starting a run use the saved settings' check, since runs use those.
+  follows), kept with the JSON of the config it checked; until it answers, and when it fails, it shows the saved
+  settings' check and says so. The Run tab and starting a run use the saved settings' check, since runs use those.
+  The chip ("Settings valid", or the counts of errors and warnings; a spinner while a data check runs) opens and
+  closes the check panel below the header: the errors and warnings, and "Check the data again" (POST /validate with
+  the data; aria-disabled while a check runs) with one line on the last data check.
 
 ### Spatial viewer (components/spatial-viewer.js, styles in css/run.css)
 ```
@@ -548,8 +606,10 @@ fieldLabel(key) -> display name of a per-bin field
   says whose range it shows. Pan and zoom are linked by default (one view in µm for all panels, with a crosshair at
   the hovered position in the others); unlinked, each panel keeps its own view per section. The H&E image
   (source.image) can be drawn under the bins, the bins then see-through by the chosen amount; it is asked for again
-  with {retry: true} only by the Retry of an image that failed to load. Save PNG writes one composite image of all
-  panels (title, map, scale bar, legend, with the notes of a shared or clamped color scale) on white.
+  with {retry: true} only by the Retry of an image that failed to load. Save PNG (a ghost button at the end of the
+  toolbar) writes one composite image of all panels (title, map, scale bar, legend, with the notes of a shared or
+  clamped color scale) on white. Zoom in, zoom out and fit are one compact group of icon-only ghost buttons
+  (role="group", "Zoom") in the top-right corner of each map.
 * Layout: the maps take the window's height less what must be seen with them (the viewer measures it: its place on
   the page when one row of panels starts in the top half of the first screen, else its toolbar and controls; measured
   again when the window is resized or the page above the viewer grows or shrinks; with four panels the second row is
@@ -575,11 +635,14 @@ dataExplorer({projectId, name, state, getConfig, focus, onOpenData}) -> {el, des
   dataKey(cfg) plus the qc thresholds (min_genes, min_counts, max_pct_mt); when that key changes, exploreState() starts
   a new state (nothing read; the viewer choices and the gene filter are kept). The state holds the config snapshot the
   requests send, the explore/samples answer, one entry per section ({status idle | loading | ok | error, summary, notes,
-  image}), the spatialViewer store, the highlighted panel and the gene filter. "Read again" re-reads everything.
+  image}), the spatialViewer store, the highlighted panel and the gene filter. "Read again" (a ghost button in the
+  Sections card's header) re-reads everything.
 * Sections table: one row per configured section, filled as each one is read (sections one at a time, the ones on the
   map first; a section that cannot be read shows why, a failed read has Retry): bins, genes in the matrix, UMIs,
   median UMIs, genes and % mitochondrial per bin, bins passing QC, microns per pixel; the qc thresholds used, barcodes
-  without a position and the server's notes underneath. A section name shows that section in the highlighted panel.
+  without a position and the server's notes underneath. A click in the row of a readable section shows it in the
+  highlighted panel (rowAction(): the section name is the row's button for the keyboard; a click that ends a text
+  selection in the row does nothing, and the row's other controls, such as Retry, keep their own clicks).
 * Map: spatialViewer on a projectSource (samples = the readable sections, bins = POST /explore/{sid}/bins, genes =
   /genes and /gene, image(sid, signal, {retry}) = the "image" of the section's bins payload, kept with the section;
   only retry (the viewer's Retry of an image that failed to load) posts /bins again, for a new image address). One
@@ -590,15 +653,18 @@ dataExplorer({projectId, name, state, getConfig, focus, onOpenData}) -> {el, des
   runs once the viewer is mounted (on every visit: with sections known from an earlier visit the viewer makes its
   panels at once), when panels are made or removed (a MutationObserver), after a press, key, focus or change in the
   viewer (its gene boxes add overlays on Enter or a suggestion's mousedown) and after each viewer.show() from the
-  explorer (section names, gene rows, the Data tab's Explore). Gene table: the
-  section's genes by UMIs (POST /genes, case-insensitive filter, 50 / 200 / 500 rows) with UMIs, bins detecting the
-  gene and their share; "Show on map" = viewer.show({panel, sample, genes: [gene]}); "Overlay" toggles
-  'gene:<gene>' in the panel's overlays: pressed (aria-pressed, a check icon) while the highlighted panel has it, a
-  click then removes it. The rows follow the overlays of the highlighted panel however they change, updated in place
-  (a focused button keeps the focus). Every row button is named by its text and its gene, the same in both states of
-  the toggle (aria-label: "Show on map: <gene>", "Overlay: <gene>"). Below 760 px the count of bins detecting the gene is left out (the share stays, its
-  title gives the count), below 480 px the buttons show their icon only (the title explains them). A "Gene table" jump
-  above the map (with four panels, and below 760 px where the panels stack) scrolls to the gene table and moves the
-  focus to it.
-* Data tab: every section the data check found has an Explore button (sampleEditor onExplore) and the Data check card
-  a pointer (reportPanel onExplore); both open the Explore tab (the section in the highlighted panel).
+  explorer (section rows, gene rows, a section opened from the Data tab). Gene table: the section's genes by UMIs
+  (POST /genes, case-insensitive filter, 50 / 200 / 500 rows) with UMIs, bins detecting the gene and their share. A
+  click in a gene row (rowAction(), as in the sections table; the gene name is the row's button) =
+  viewer.show({panel, sample, genes: [gene]}); the row is marked and its name pressed (aria-pressed) while the
+  highlighted panel is colored by that gene alone. The layers toggle at the end of the row (.btn.toggle, icon-only, in
+  .row-actions) adds 'gene:<gene>' to the panel's overlays, on top of its coloring, or removes it: pressed
+  (aria-pressed) and kept visible (.keep) while the highlighted panel has it; its aria-label "Show <gene> as an
+  overlay" is the same in both states, its title says what a click does. The rows follow the coloring and the
+  overlays of the highlighted panel however they change, updated in place (a focused button keeps the focus). Below
+  760 px the count of bins detecting the gene is left out (the share stays, its title gives the count). A "Gene
+  table" jump above the map (with four panels, and below 760 px where the panels stack) scrolls to the gene table and
+  moves the focus to it.
+* Data tab: the bin count of every section the data check found is a button (sampleEditor onExplore; aria-label
+  "<bins>: explore section <id>") that opens the Explore tab with that section in the highlighted panel; the Data
+  check card's pointer has an "Explore tab" text link (reportPanel onExplore) that opens the tab.

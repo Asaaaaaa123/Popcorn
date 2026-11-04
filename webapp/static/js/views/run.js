@@ -1,9 +1,11 @@
 // run.js — one run: header (status, times, actions) and the tabs progress | summary | figures | tables | viewer |
 // config. The run record is polled every 1.5 s while the run is queued or running. Results are fetched when their tab
 // is first opened and kept in memory while the view lives; they are fetched again once after the run finishes.
+// Header actions: Export (a menu of zip downloads), Re-run and a "Run actions" menu (open the project, delete the run);
+// Cancel joins them while the run is queued or running.
 import {
-  h, api, apiUrl, mount, button, icon, card, tabs, statusBadge, loading, emptyState, errorPanel, banner, toast,
-  confirmDialog, promptDialog, fmt, copyText, navigate, setPathSilently, clone, refreshHealth, state,
+  h, api, apiUrl, mount, button, menuButton, icon, card, tabs, statusBadge, loading, emptyState, errorPanel, banner,
+  toast, confirmDialog, promptDialog, fmt, copyText, navigate, setPathSilently, clone, refreshHealth, state,
 } from '../core.js';
 import { logView, downloadText } from '../components/log-view.js';
 import { tableBrowser, fileUrl, formatNumber } from '../components/table-viewer.js';
@@ -25,6 +27,9 @@ const RESULT_TABS = new Set(['summary', 'figures', 'tables', 'viewer']);
 const STEP_TEXT = { pending: 'pending', running: 'running', done: 'done', skipped: 'skipped', failed: 'failed' };
 const WARNINGS_SHOWN = 8;
 const PER_BIN_TABLE = /^per_bin_signature_calls_\d+um\.csv\.gz$/;
+// files of a run that GET /export/results?part=tables and ?part=figures put in their zips (server.py results_zip)
+const TABLE_FILE = /\.(?:csv|tsv)(?:\.gz)?$/i;
+const FIGURE_FILE = /^figures\/.+\.(?:png|pdf)$/i;
 
 const isColor = (c) => typeof c === 'string' && /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i.test(c.trim());
 const numOrNull = (v) => (v === null || v === undefined || v === '' || !Number.isFinite(Number(v)) ? null : Number(v));
@@ -43,6 +48,56 @@ function secondsText(s) {
 function binUmOf(cfg) {
   const m = cfg && /^(\d{3})um$/.exec(String(cfg.bin_size || ''));
   return m ? Number(m[1]) : NaN;
+}
+
+/** Name of a downloaded file from the response's Content-Disposition header (RFC 6266), else `fallback`. */
+function fileNameOf(res, fallback) {
+  const cd = res.headers.get('Content-Disposition') || '';
+  let name = '';
+  const star = /filename\*\s*=\s*(?:[\w-]+)?'[^']*'([^;]+)/i.exec(cd);
+  if (star) {
+    try { name = decodeURIComponent(star[1].trim().replace(/^"|"$/g, '')); } catch { /* malformed: use the plain one */ }
+  }
+  if (!name) {
+    const plain = /filename\s*=\s*(?:"([^"]*)"|([^;]+))/i.exec(cd);
+    if (plain) name = (plain[1] ?? plain[2] ?? '').trim();
+  }
+  name = name.replace(/[\\/]/g, '_');
+  return name || fallback;
+}
+
+/**
+ * Download a zip that the server builds on request (GET /api/runs/<id>/export/...). It is fetched rather than linked,
+ * so that a refused export (409 while the run is active, 404 when the run has nothing of that kind, 422 without the
+ * raw data) shows the server's reason in a toast instead of opening or saving a JSON error. `what` names the download
+ * in that message ("the figures"). Resolves to {name, size} once saved, or null when it was refused.
+ */
+async function downloadZip(url, fallbackName, what) {
+  let res;
+  try {
+    res = await fetch(url, { credentials: 'same-origin' });
+  } catch {
+    toast('Cannot reach the server. Is it still running?', 'error');
+    return null;
+  }
+  if (!res.ok) {
+    let message = `request failed (HTTP ${res.status})`;
+    try {
+      const data = await res.json();
+      if (data && typeof data.detail === 'string' && data.detail) message = data.detail;
+    } catch { /* not JSON */ }
+    toast(`Could not download ${what}: ${message}`, 'error');
+    return null;
+  }
+  const blob = await res.blob();
+  const name = fileNameOf(res, fallbackName);
+  const href = URL.createObjectURL(blob);
+  const link = h('a', { href, download: name, hidden: true });
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(href), 60000);
+  return { name, size: blob.size };
 }
 
 /** Element that shows the time since `iso` and is kept current by the view's one-second ticker. */
@@ -78,6 +133,13 @@ function stepIcon(status) {
   if (status === 'running') return h('span', { class: 'spinner' });
   if (status === 'skipped') return h('span', { class: 'run-dash' });
   return h('span', { class: 'run-ring' });
+}
+
+/** Small icon button in the corner of the traceback, as on code blocks. */
+function copyTracebackButton(text) {
+  const b = button({ icon: 'copy', small: true, title: 'Copy traceback', onClick: () => copyText(text) });
+  b.setAttribute('aria-label', 'Copy traceback');
+  return b;
 }
 
 function progressHeadline(r) {
@@ -164,8 +226,10 @@ function summaryView(s) {
   }
   parts.push(card({
     title: 'Overview',
+    // a quiet pointer to the warnings card further down, colored as a warning rather than drawn as another button
     actions: warnings.length ? h('button', {
-      class: 'btn small', type: 'button', onClick: () => warningsCard.scrollIntoView({ behavior: 'smooth', block: 'start' }),
+      class: 'btn small ghost sum-warn-link', type: 'button', title: 'Go to the warnings',
+      onClick: () => warningsCard.scrollIntoView({ behavior: 'smooth', block: 'start' }),
     }, icon('alert', { size: 14 }), `${warnings.length} warning${warnings.length === 1 ? '' : 's'}`) : null,
     body: h('dl', { class: 'kv sum-overview' },
       h('dt', null, 'Finished'), h('dd', null, fmt.date(s.finished)),
@@ -268,7 +332,7 @@ export async function renderRun(container, { id, tab }) {
   st.tab = known ? tab : (ACTIVE.has(first.status) ? 'progress' : 'summary');
   if (tab && !known) setPathSilently(`/runs/${enc}/${st.tab}`);
 
-  const headerEl = h('div');
+  const headerEl = h('div', { class: 'page-header run-header' });
   const noticeEl = h('div');
   const tabsEl = h('div');
   const bodyEl = h('div', { class: 'run-body' });
@@ -306,10 +370,32 @@ export async function renderRun(container, { id, tab }) {
   const getManifest = () => fetchResult('manifest', `/api/runs/${enc}/manifest`);
   const cachedManifest = () => (st.cache.manifest && st.cache.manifest.value) || null;
 
-  // ---- header
+  // ---- header: the titles are repainted when the run changes. The actions are built once, so that a poll never
+  // takes the focus from them or closes their menus: the menus read the run when they open, and only Cancel comes and
+  // goes with the run's activity.
+  const titlesEl = h('div', { class: 'titles' });
+  const rerunBtn = button({ label: 'Re-run', icon: 'refresh', title: 'Start a new run with the same configuration snapshot and regions', onClick: rerun });
+  const actionsEl = h('div', { class: 'actions' },
+    menuButton({ label: 'Export', icon: 'download', items: exportItems }),
+    rerunBtn,
+    menuButton({ title: 'Run actions', items: runActionItems }));
+  mount(headerEl, titlesEl, actionsEl);
+  let cancelBtn = null;
+
   function paintHeader() {
     const r = st.run;
     const active = isActive();
+    if (active && !cancelBtn) {
+      // while the run is queued or running, stopping it is the action that matters: a visible button
+      cancelBtn = button({ label: 'Cancel', icon: 'stop', kind: 'danger', onClick: cancelRun });
+      actionsEl.prepend(cancelBtn);
+    } else if (!active && cancelBtn) {
+      // the run stopped (often by this button and its dialog): the focus moves on to the next action, not to the page
+      const hadFocus = cancelBtn.contains(document.activeElement);
+      cancelBtn.remove();
+      cancelBtn = null;
+      if (hadFocus) rerunBtn.focus();
+    }
     const title = r.label || r.project_name || r.id;
     const sig = JSON.stringify([r.status, title, r.project_id, r.project_name, fmt.ago(r.created), r.started, r.finished, r.duration_s]);
     if (sig === headerSig) return;
@@ -323,20 +409,100 @@ export async function renderRun(container, { id, tab }) {
     if (r.finished) meta.push(h('span', null, `Finished ${fmt.date(r.finished)}`));
     if (r.status === 'running' && r.started) meta.push(h('span', null, 'Running for ', liveDuration(r.started)));
     else if (numOrNull(r.duration_s) !== null) meta.push(h('span', null, `Duration ${fmt.duration(r.duration_s)}`));
-    const actions = [];
-    if (active) actions.push(button({ label: 'Cancel', icon: 'stop', kind: 'danger', onClick: cancelRun }));
-    actions.push(button({ label: 'Re-run', icon: 'refresh', title: 'Start a new run with the same configuration snapshot and regions', onClick: rerun }));
-    if (r.project_id) {
-      actions.push(h('a', { class: 'btn', href: `#/projects/${encodeURIComponent(r.project_id)}` }, icon('folder', { size: 16 }), 'Open project'));
+    mount(titlesEl,
+      h('nav', { class: 'breadcrumb', 'aria-label': 'Breadcrumb' },
+        h('a', { href: '#/runs' }, 'Runs'), h('span', { 'aria-hidden': 'true' }, '/'), h('span', { class: 'mono' }, r.id)),
+      h('div', { class: 'run-title' }, h('h1', null, title), statusBadge(r.status)),
+      h('div', { class: 'subtitle run-meta' }, meta));
+  }
+
+  // "Run actions" menu: the project (also linked in the subtitle) and deleting the run
+  function runActionItems() {
+    const r = st.run;
+    const active = isActive();
+    return [
+      r.project_id ? {
+        label: 'Open project', icon: 'folder', hint: r.project_name || r.project_id,
+        href: `#/projects/${encodeURIComponent(r.project_id)}`,
+      } : null,
+      'separator',
+      {
+        label: 'Delete run', icon: 'trash', danger: true, disabled: active,
+        hint: active ? 'Cancel the run before deleting it' : null, onClick: deleteRun,
+      },
+    ];
+  }
+
+  // ---- export: zips of the results, built by the server on request
+  const EXPORTS = {
+    all: {
+      label: 'All results', icon: 'folder', hint: 'Figures, tables, summary, configuration and log (.zip)',
+      what: 'the results', preparing: 'Preparing the results for download…',
+      url: apiUrl(`/api/runs/${enc}/export/results`), file: `${id}_results.zip`,
+      note: 'Data objects (.h5ad) are not included; the Tables tab downloads them one by one.',
+    },
+    figures: {
+      label: 'Figures', icon: 'image', hint: 'PNG and PDF (.zip)',
+      what: 'the figures', preparing: 'Preparing the figures for download…',
+      url: apiUrl(`/api/runs/${enc}/export/results`, { part: 'figures' }), file: `${id}_figures.zip`,
+    },
+    tables: {
+      label: 'Tables', icon: 'table', hint: 'CSV files (.zip)',
+      what: 'the tables', preparing: 'Preparing the tables for download…',
+      url: apiUrl(`/api/runs/${enc}/export/results`, { part: 'tables' }), file: `${id}_tables.zip`,
+    },
+    loupe: {
+      label: 'Loupe Browser', icon: 'map', hint: 'Category CSVs for each section’s .cloupe file (.zip)',
+      what: 'the Loupe Browser export', preparing: 'Preparing the Loupe Browser export…',
+      url: apiUrl(`/api/runs/${enc}/export/loupe`), file: `${id}_loupe.zip`,
+      note: 'Its README.txt says which file goes with which section’s .cloupe file and how to import it.',
+    },
+  };
+  const exporting = new Set();
+
+  async function exportZip(kind) {
+    const x = EXPORTS[kind];
+    if (!x || exporting.has(kind)) return;
+    exporting.add(kind);
+    // building a zip takes from a moment to several seconds (Loupe Browser); say so unless it is quick
+    let closeNote = null;
+    const noteTimer = setTimeout(() => { closeNote = toast(x.preparing, 'info', { timeout: 0 }); }, 300);
+    try {
+      const saved = await downloadZip(x.url, x.file, x.what);
+      if (saved) {
+        toast(`Downloaded ${saved.name} (${fmt.bytes(saved.size)}).${x.note ? ` ${x.note}` : ''}`, 'success',
+          { timeout: x.note ? 9000 : 4500 });
+      }
+    } finally {
+      clearTimeout(noteTimer);
+      if (closeNote) closeNote();
+      exporting.delete(kind);
     }
-    if (!active) actions.push(button({ label: 'Delete', icon: 'trash', kind: 'danger', onClick: deleteRun }));
-    mount(headerEl, h('div', { class: 'page-header run-header' },
-      h('div', { class: 'titles' },
-        h('nav', { class: 'breadcrumb', 'aria-label': 'Breadcrumb' },
-          h('a', { href: '#/runs' }, 'Runs'), h('span', { 'aria-hidden': 'true' }, '/'), h('span', { class: 'mono' }, r.id)),
-        h('div', { class: 'run-title' }, h('h1', null, title), statusBadge(r.status)),
-        h('div', { class: 'subtitle run-meta' }, meta)),
-      h('div', { class: 'actions' }, actions)));
+  }
+
+  function exportItems() {
+    const active = isActive();
+    // what the manifest (fetched for a finished run) already says is missing; unknown -> left to the server. The server
+    // zips files by their type, whatever list of the manifest they are in (a table of another kind is in "other", a
+    // figure missing from figures/manifest.json too), so every listed file is looked at.
+    const m = cachedManifest();
+    const listOf = (k) => (m && Array.isArray(m[k]) ? m[k].filter((x) => x && typeof x === 'object') : []);
+    const files = ['tables', 'objects', 'other'].flatMap(listOf).map((x) => String(x.file || ''));
+    const missing = m ? {
+      figures: listOf('figures').some((f) => f.png_url || f.pdf_url) || files.some((f) => FIGURE_FILE.test(f))
+        ? null : 'This run has no figures',
+      tables: files.some((f) => TABLE_FILE.test(f)) ? null : 'This run wrote no tables',
+      loupe: files.some((f) => PER_BIN_TABLE.test(f)) ? null : 'This run has no per-bin table to export',
+    } : {};
+    const item = (kind) => {
+      const x = EXPORTS[kind];
+      let off = null;
+      if (active) off = 'Available when the run has finished';
+      else if (exporting.has(kind)) off = 'Preparing…';
+      else if (missing[kind]) off = missing[kind];
+      return { label: x.label, icon: x.icon, hint: off || x.hint, disabled: !!off, onClick: () => exportZip(kind) };
+    };
+    return [{ heading: 'Download' }, item('all'), item('figures'), item('tables'), 'separator', item('loupe')];
   }
 
   function setNotice(node) {
@@ -475,9 +641,7 @@ export async function renderRun(container, { id, tab }) {
         class: 'run-traceback', open: st.tracebackOpen,
         onToggle: (e) => { st.tracebackOpen = e.currentTarget.open; },
       }, h('summary', null, 'Traceback'),
-      h('div', { class: 'run-traceback-body' },
-        button({ label: 'Copy', icon: 'copy', small: true, onClick: () => copyText(r.traceback) }),
-        h('pre', { class: 'run-pre' }, r.traceback))) : null;
+      h('div', { class: 'run-traceback-body' }, copyTracebackButton(r.traceback), h('pre', { class: 'run-pre' }, r.traceback))) : null;
       out.push(h('div', { class: 'banner danger run-failure', role: 'alert' }, icon('alert', { size: 18 }),
         h('div', { class: 'banner-body' },
           h('strong', null, r.status === 'interrupted' ? 'The run was interrupted.' : 'The analysis failed.'),
@@ -545,14 +709,8 @@ export async function renderRun(container, { id, tab }) {
     } else {
       text = 'This run stopped before writing its summary. The Progress tab shows what happened; the Tables tab lists any outputs written before it stopped.';
     }
-    return {
-      el: card({
-        body: emptyState({
-          icon: iconName, title: isActive() ? 'No results yet' : 'No summary', text,
-          action: button({ label: 'Show progress', icon: 'activity', small: true, onClick: () => selectTab('progress') }),
-        }),
-      }),
-    };
+    // no "Show progress" button here: the text points to the Progress tab, one click away in the tab strip
+    return { el: card({ body: emptyState({ icon: iconName, title: isActive() ? 'No results yet' : 'No summary', text }) }) };
   }
 
   async function figuresPane() {
@@ -573,7 +731,14 @@ export async function renderRun(container, { id, tab }) {
       }
       return { el: card({ body: emptyState({ icon: 'image', title: 'No figures', text }) }) };
     }
-    const g = figureGallery({ figures });
+    // one download for every figure; each figure's own PNG and PDF are in its viewer
+    const active = isActive();
+    const downloadAll = button({
+      label: 'Download all', icon: 'download', small: true, kind: 'ghost', disabled: active,
+      title: active ? 'Available when the run has finished' : 'All figures as PNG and PDF (.zip)',
+      onClick: () => exportZip('figures'),
+    });
+    const g = figureGallery({ figures, actions: downloadAll });
     return {
       el: h('div', { class: 'stack' },
         isActive() ? banner('info', 'The run is still in progress; more figures may appear when it finishes.') : null, g.el),
@@ -595,56 +760,13 @@ export async function renderRun(container, { id, tab }) {
         }),
       };
     }
+    // the Loupe Browser export of the per-bin calls is in the header's Export menu, with the other zips
     const tb = tableBrowser({ runId: id, manifest: m, store: st.tableStore });
-    const perBin = Array.isArray(m.tables) && m.tables.some((t) => t && PER_BIN_TABLE.test(String(t.file)));
     return {
       el: h('div', { class: 'stack' },
-        isActive() ? banner('info', 'The run is still in progress; this list shows the files written so far.') : null,
-        perBin && !isActive() ? loupeExport() : null, tb.el),
+        isActive() ? banner('info', 'The run is still in progress; this list shows the files written so far.') : null, tb.el),
       destroy: tb.destroy,
     };
-  }
-
-  // The per-bin calls as category CSV files for 10x Genomics Loupe Browser (GET /export/loupe, a zip). The zip is
-  // fetched rather than linked, so that a refused export shows the server's reason instead of saving it as a file.
-  function loupeExport() {
-    const fileName = `${id}_loupe.zip`;
-    const status = h('div', { class: 'run-export-status', 'aria-live': 'polite' });
-    async function download() {
-      mount(status);
-      let res;
-      try {
-        res = await fetch(apiUrl(`/api/runs/${enc}/export/loupe`), { credentials: 'same-origin' });
-      } catch {
-        mount(status, banner('danger', 'Cannot reach the server. Is it still running?'));
-        return;
-      }
-      if (!res.ok) {
-        let message = `Request failed (HTTP ${res.status})`;
-        try {
-          const data = await res.json();
-          if (data && typeof data.detail === 'string' && data.detail) message = data.detail;
-        } catch { /* not JSON */ }
-        mount(status, banner('danger', [h('strong', null, 'The export was refused: '), message]));
-        return;
-      }
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const link = h('a', { href: url, download: fileName, hidden: true });
-      document.body.append(link);
-      link.click();
-      link.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 60000);
-      mount(status, h('p', { class: 'faint small' },
-        `Downloaded ${fileName} (${fmt.bytes(blob.size)}). Its README.txt says which file goes with which section's .cloupe file and how to import it.`));
-    }
-    const el = card({
-      cls: 'run-export', title: 'Loupe Browser',
-      subtitle: 'The calls of every bin (tissue class, signature, Leiden domain, region, positivity) as category CSV files to import into each section’s .cloupe file in 10x Genomics Loupe Browser.',
-      actions: button({ label: 'Export for Loupe Browser', icon: 'download', small: true, onClick: download }),
-    });
-    el.append(status);
-    return el;
   }
 
   function viewerPane() {
@@ -662,10 +784,17 @@ export async function renderRun(container, { id, tab }) {
     }
     const text = JSON.stringify(cfg, null, 2);
     const fileName = `${id}-config.json`;
+    // Copy and Download are small icon buttons beside the one main action of the tab, creating a project from it.
     // results/config.json exists once the analysis has started writing; before that the snapshot is downloaded as shown
     const download = st.run.status === 'succeeded'
-      ? h('a', { class: 'btn small', href: fileUrl(id, 'config.json', true), download: fileName }, icon('download', { size: 14 }), 'Download')
-      : button({ label: 'Download', icon: 'download', small: true, onClick: () => downloadText(fileName, text, 'application/json') });
+      ? h('a', {
+        class: 'btn small ghost icon-only', href: fileUrl(id, 'config.json', true), download: fileName,
+        title: 'Download config.json', 'aria-label': 'Download config.json',
+      }, icon('download', { size: 14 }))
+      : button({ icon: 'download', small: true, kind: 'ghost', title: 'Download config.json', onClick: () => downloadText(fileName, text, 'application/json') });
+    download.setAttribute('aria-label', 'Download config.json');
+    const copy = button({ icon: 'copy', small: true, kind: 'ghost', title: 'Copy config.json', onClick: () => copyText(text) });
+    copy.setAttribute('aria-label', 'Copy config.json');
     const samples = (Array.isArray(cfg.samples) ? cfg.samples : []).filter((x) => x && typeof x === 'object');
     const stepsOff = Object.entries(cfg.steps && typeof cfg.steps === 'object' ? cfg.steps : {}).filter(([, on]) => on === false).map(([k]) => k);
     const masks = cfg.roi && cfg.roi.masks && typeof cfg.roi.masks === 'object' ? Object.keys(cfg.roi.masks) : [];
@@ -691,8 +820,7 @@ export async function renderRun(container, { id, tab }) {
       el: h('div', { class: 'stack-lg' }, overview, card({
         title: 'config.json', subtitle: 'The configuration snapshot this run used, defaults included',
         actions: [
-          button({ label: 'Copy', icon: 'copy', small: true, onClick: () => copyText(text) }),
-          download,
+          copy, download,
           button({ label: 'Create project from this configuration', icon: 'plus', small: true, kind: 'primary', onClick: createProject }),
         ],
         flush: true, body: jsonView(cfg),

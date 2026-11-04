@@ -327,7 +327,7 @@ export function roiEditor({ projectId, cfg, store, savedRois, getVersion, sample
     const saveBtn = button({ label: saving ? 'Saving…' : 'Save region', icon: 'save', kind: 'primary', small: true, disabled: !unsaved || saving, onClick: saveRegion });
     const revertBtn = button({ label: 'Revert', icon: 'undo', small: true, disabled: !unsaved || saving, onClick: revert });
     revertBtn.title = 'Back to the saved region (Ctrl+Z restores your edits)';
-    const delBtn = button({ label: 'Delete region', icon: 'trash', kind: 'danger', small: true, disabled: !savedHere || saving, onClick: deleteRegion });
+    const delBtn = button({ label: 'Delete region', icon: 'trash', kind: 'ghost danger', small: true, disabled: !savedHere || saving, onClick: deleteRegion });
     mount(sideRegion,
       sid ? h('div', { class: 'row between' },
         h('span', null, savedHere ? 'Saved region' : 'No saved region'),
@@ -354,7 +354,7 @@ export function roiEditor({ projectId, cfg, store, savedRois, getVersion, sample
   mount(sideAnalysis, useSwitch,
     h('p', { class: 'muted small' }, 'When on, each section is restricted to the bins inside its drawn region, intersected with the '
       + 'transcriptional region of interest (Parameters → Region of interest). Sections without a drawn region are not restricted. '
-      + 'This switch is a project setting (Save at the top of the page); regions are saved with “Save region”.'),
+      + 'This switch is a project setting (Save in the bar at the bottom of the page, or Ctrl+S); regions are saved with “Save region”.'),
     analysisNotes);
 
   function paintAnalysis() {

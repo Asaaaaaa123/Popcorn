@@ -18,6 +18,7 @@ import { binLabel } from './sample-editor.js';
 const KEEP_AHEAD = 2; // bins payloads read for the table and kept for the viewer until it takes them
 const GENE_LIMITS = [50, 200, 500];
 const GENE_OVERLAY = 'gene:'; // overlay key of "detected" layers in the viewer store: 'gene:Ctsk' (spatial-viewer.js)
+const GENE_FIELD = '__gene__'; // "Color by" value of a panel colored by genes in the viewer store (spatial-viewer.js)
 const HEX_RE = /^#[0-9A-Fa-f]{6}$/;
 
 const enc = encodeURIComponent;
@@ -38,6 +39,25 @@ function untilAborted(p, signal) {
     signal.addEventListener('abort', onAbort, { once: true });
     p.then((v) => { signal.removeEventListener('abort', onAbort); resolve(v); },
       (e) => { signal.removeEventListener('abort', onAbort); reject(e); });
+  });
+}
+
+/**
+ * Make a click anywhere in a table row its main action, so that a row needs no button of its own for it: `btn`, a real
+ * button in the row (reached with Tab, pressed with Enter or Space), has no handler and runs `fn` through the row (its
+ * click bubbles up); the other controls of the row keep their clicks to themselves, and a click that ends a text
+ * selection in the row (copying a name or a number) does nothing.
+ */
+function rowAction(tr, btn, fn) {
+  tr.classList.add('dx-click');
+  tr.addEventListener('click', (e) => {
+    const ctl = e.target instanceof Element ? e.target.closest('button, a, input, select, textarea, label') : null;
+    if (ctl && ctl !== btn) return;
+    if (ctl !== btn) {
+      const sel = window.getSelection ? window.getSelection() : null;
+      if (sel && !sel.isCollapsed && tr.contains(sel.anchorNode)) return;
+    }
+    fn();
   });
 }
 
@@ -79,7 +99,7 @@ export function exploreState(cfg, key, previous = null) {
 /**
  * dataExplorer({projectId, name, state, getConfig, focus, onOpenData}) -> {el, destroy()}
  * state: exploreState(); getConfig() -> the current draft (labels and colors are read from it); focus: a section to
- * show first (the Data tab's Explore action); onOpenData(): switch to the Data tab.
+ * show first (a section's bin count in the Data tab); onOpenData(): switch to the Data tab.
  */
 export function dataExplorer({ projectId, name = '', state: st, getConfig, focus = null, onOpenData }) {
   let destroyed = false;
@@ -96,8 +116,8 @@ export function dataExplorer({ projectId, name = '', state: st, getConfig, focus
   let geneBusy = false;
   let geneCtrl = null;
   let geneSeq = 0;
-  let geneRows = []; // [{gene, tr, show, toggle}] of the gene table painted
-  let genesShownFor = ''; // panel count, highlighted panel and its overlays when the gene rows were painted
+  let geneRows = []; // [{gene, tr, show, toggle, actions}] of the gene table painted
+  let genesShownFor = ''; // panel count, highlighted panel, its coloring and overlays when the gene rows were painted
   let titlesFor = 1; // panel count the section names' titles were written for
 
   const url = (path) => `/api/projects/${enc(projectId)}/explore${path}`;
@@ -137,13 +157,14 @@ export function dataExplorer({ projectId, name = '', state: st, getConfig, focus
   const tableHost = h('div', { class: 'dx-sections' });
   const qcLine = h('p', { class: 'dx-qc' });
   const notesHost = h('div');
+  // a rare action: a quiet button in the card's header
   const reloadBtn = button({
-    label: 'Read again', icon: 'refresh', small: true, onClick: () => reload(),
+    label: 'Read again', icon: 'refresh', small: true, kind: 'ghost', onClick: () => reload(),
     title: 'Read the sections again (after the files on disk changed)',
   });
   const summaryCard = card({
     title: 'Sections',
-    subtitle: 'The Space Ranger outputs as the analysis reads them, with the current settings (saved or not), before quality control and any run.',
+    subtitle: 'The Space Ranger outputs as the analysis reads them, with the current settings (saved or not), before quality control and any run. Click a section to show it on the map.',
     actions: reloadBtn,
     body: h('div', { class: 'stack' }, tableHost, qcLine, notesHost),
   });
@@ -262,16 +283,16 @@ export function dataExplorer({ projectId, name = '', state: st, getConfig, focus
   };
 
   // ---------------------------------------------------------------- section table
-  /** Section name (a button that shows it on the map when it can be read), id and the matrix it comes from. */
+  /**
+   * Section name, id and the matrix it comes from. The name of a section that can be read is the button of its row,
+   * which shows the section on the map (a click anywhere in the row does the same, see sectionRow()).
+   */
   function sectionCell(s) {
     const sec = st.sections.get(s.id);
     const matrix = sec && sec.summary ? sec.summary.matrix : '';
     const label = labelOf(s);
     const nameEl = s.ok
-      ? h('button', {
-        type: 'button', class: 'linklike dx-section-label', title: `Show ${sectionText(s.id)} on ${where()}`,
-        onClick: () => showSection(s.id),
-      }, label)
+      ? h('button', { type: 'button', class: 'dx-row-btn dx-section-label', title: `Show ${sectionText(s.id)} on ${where()}` }, label)
       : h('span', { class: 'dx-section-label' }, label);
     return h('td', { title: matrix ? `Matrix: ${matrix}` : null },
       h('div', { class: 'dx-section' },
@@ -279,12 +300,8 @@ export function dataExplorer({ projectId, name = '', state: st, getConfig, focus
         h('span', { class: 'dx-section-text' }, nameEl, label !== s.id ? h('span', { class: 'mono small muted' }, s.id) : null)));
   }
 
-  function sectionRow(s) {
-    const head = sectionCell(s);
-    if (!s.ok) {
-      return h('tr', { class: 'row-bad' }, head,
-        h('td', { colSpan: 8 }, h('div', { class: 'dx-row-msg bad' }, icon('alert', { size: 14 }), h('span', null, s.message || 'This section cannot be read.'))));
-    }
+  /** The cells after the name: the numbers of a section read, else what holds them up (reading, waiting, an error). */
+  function sectionCells(s) {
     const sec = sectionState(s.id);
     const sum = sec.summary;
     if (!sum) {
@@ -293,12 +310,12 @@ export function dataExplorer({ projectId, name = '', state: st, getConfig, focus
           button({ label: 'Retry', icon: 'refresh', small: true, kind: 'ghost', onClick: () => { binsOf(s.id, true).catch(() => {}); } }))
         : h('div', { class: 'dx-row-msg' }, sec.status === 'loading' ? h('span', { class: 'spinner' }) : icon('clock', { size: 14 }),
           h('span', null, sec.status === 'loading' ? 'Reading the counts…' : 'Waiting for its turn…'));
-      return h('tr', null, head,
+      return [
         h('td', { class: 'num muted', title: 'Bins under tissue in the positions file' }, fmt.int(s.n_bins)),
-        h('td', { colSpan: 7 }, msg));
+        h('td', { colSpan: 7 }, msg)];
     }
     const missing = Number(sum.n_without_position) || 0;
-    return h('tr', null, head,
+    return [
       h('td', { class: 'num', title: `${fmt.int(sum.n_barcodes)} barcodes in the matrix${missing ? `, ${fmt.int(missing)} of them without a position under tissue (left out)` : ''}` }, fmt.int(sum.n_bins)),
       h('td', { class: 'num' }, fmt.int(sum.n_features)),
       h('td', { class: 'num', title: `Mean ${fmt.num(sum.mean_umi, 1)} UMIs per bin` }, fmt.int(sum.total_umi)),
@@ -306,7 +323,19 @@ export function dataExplorer({ projectId, name = '', state: st, getConfig, focus
       h('td', { class: 'num' }, fmt.num(sum.median_genes, 1)),
       h('td', { class: 'num' }, fmt.pct(sum.median_pct_mt, 2)),
       h('td', { class: 'num' }, h('div', null, fmt.int(sum.n_pass_qc)), h('div', { class: 'small muted' }, fmt.pct(sum.pct_pass_qc, 1))),
-      h('td', { class: 'num' }, fmt.num(sum.microns_per_pixel, 4)));
+      h('td', { class: 'num' }, fmt.num(sum.microns_per_pixel, 4))];
+  }
+
+  /** A row of the section table; a click in the row of a section that can be read shows it on the map. */
+  function sectionRow(s) {
+    const head = sectionCell(s);
+    if (!s.ok) {
+      return h('tr', { class: 'row-bad' }, head,
+        h('td', { colSpan: 8 }, h('div', { class: 'dx-row-msg bad' }, icon('alert', { size: 14 }), h('span', null, s.message || 'This section cannot be read.'))));
+    }
+    const tr = h('tr', null, head, sectionCells(s));
+    rowAction(tr, head.querySelector('button.dx-section-label'), () => showSection(s.id));
+    return tr;
   }
 
   function paintRow(sid) {
@@ -317,7 +346,13 @@ export function dataExplorer({ projectId, name = '', state: st, getConfig, focus
     const tr = sectionRow(s);
     tr.classList.toggle('active', sid === geneSid);
     rows.set(sid, tr);
+    // the row's button (its section name) keeps the keyboard focus through the repaint (counts read, a retry)
+    const hadFocus = old.contains(document.activeElement);
     old.replaceWith(tr);
+    if (hadFocus) {
+      const b = tr.querySelector('button.dx-section-label') || tr.querySelector('button');
+      if (b) b.focus({ preventScroll: true });
+    }
   }
 
   function paintTable() {
@@ -339,7 +374,7 @@ export function dataExplorer({ projectId, name = '', state: st, getConfig, focus
     });
     mount(tableHost, h('div', { class: 'table-wrap' }, h('table', { class: 'table compact dx-table' },
       h('thead', null, h('tr', null,
-        th('Section', 'Click a name to show the section on the map', false),
+        th('Section', 'Click a section to show it on the map', false),
         th('Bins', 'Bins under tissue with a position: the bins the analysis loads'),
         th('Genes', 'Genes (Gene Expression features) in the matrix'),
         th('UMIs', 'All UMIs of the section (transcripts captured)'),
@@ -401,14 +436,23 @@ export function dataExplorer({ projectId, name = '', state: st, getConfig, focus
     return p && Array.isArray(p.overlays) ? p.overlays : [];
   }
 
-  /** What the gene rows show depends on: the panel count (their titles), the highlighted panel and its overlays. */
-  const rowsKey = () => `${panelCount()}\n${st.target}\n${targetOverlays().join('\n')}`;
+  /** Genes coloring the highlighted panel, none when it is colored by something else (the gene table marks the gene). */
+  function targetGenes() {
+    const p = Array.isArray(st.viewer.panels) ? st.viewer.panels[st.target] : null;
+    return p && p.field === GENE_FIELD && Array.isArray(p.genes) ? p.genes : [];
+  }
+
+  /**
+   * What the gene rows show depends on: the panel count (their titles), the highlighted panel, the genes coloring it
+   * and its overlays.
+   */
+  const rowsKey = () => JSON.stringify([panelCount(), st.target, targetGenes(), targetOverlays()]);
 
   /**
    * Everything that follows the highlighted panel: its outline (two or four panels), the section of the gene table and
-   * the active row of the section table, and the pressed overlay toggles of the gene rows. Called after every change
-   * of the viewer: panels made or removed (the observer), a click, focus or change in it, each viewer.show() from
-   * here, and once the viewer is mounted (its panels may come before the observer).
+   * the active row of the section table, the gene row shown on it and the pressed overlay toggles. Called after every
+   * change of the viewer: panels made or removed (the observer), a click, focus or change in it, each viewer.show()
+   * from here, and once the viewer is mounted (its panels may come before the observer).
    */
   function markTarget() {
     if (destroyed) return;
@@ -418,7 +462,8 @@ export function dataExplorer({ projectId, name = '', state: st, getConfig, focus
     geneJump.dataset.panels = String(panelCount());
     if (titlesFor !== panelCount()) paintSectionTitles();
     syncGeneSection();
-    // the overlays of the highlighted panel changed (added here or in the viewer), or another panel is highlighted
+    // the coloring or the overlays of the highlighted panel changed (here or in the viewer), or another panel is
+    // highlighted
     if (rowsKey() !== genesShownFor) paintGeneRows();
   }
 
@@ -526,8 +571,8 @@ export function dataExplorer({ projectId, name = '', state: st, getConfig, focus
     if (destroyed) return;
     geneTitle.textContent = geneSid ? `Genes of ${sectionText(geneSid)}` : 'Genes';
     geneSub.textContent = panelCount() > 1
-      ? 'Ranked by UMIs in the section of the highlighted panel (click a panel to choose it). “Show on map” colors that panel by the gene; “Overlay” marks the bins detecting it (checked while they are marked; click it again to remove the overlay).'
-      : 'Ranked by UMIs in the section on the map. “Show on map” colors the map by the gene; “Overlay” marks the bins detecting it (checked while they are marked; click it again to remove the overlay).';
+      ? 'Ranked by UMIs in the section of the highlighted panel (click a panel to choose it). Click a gene to color that panel by it; the layers button at the end of its row adds it as an overlay on top of the current coloring (click it again to remove the overlay).'
+      : 'Ranked by UMIs in the section on the map. Click a gene to color the map by it; the layers button at the end of its row adds it as an overlay on top of the current coloring (click it again to remove the overlay).';
   }
 
   const searchSoon = debounce(() => searchGenes(), 250);
@@ -566,51 +611,60 @@ export function dataExplorer({ projectId, name = '', state: st, getConfig, focus
       h('span', { class: 'dx-pct-text' }, fmt.pct(v, 1)));
   }
 
-  /** Icon and text of a row button; the text gives way to the icon in narrow windows (css/project.css). */
-  const buttonFace = (iconName, text) => [icon(iconName, { size: 14 }), h('span', { class: 'dx-btn-text' }, text)];
-
   /**
-   * A gene row: "Show on map" and the "Overlay" toggle, each named by its text and the gene (aria-label; the text
-   * comes first, so the name holds what is seen, and the toggle keeps its text and name in both states: its state is
-   * aria-pressed and the icon). paintGeneRow() writes what depends on the highlighted panel.
+   * A gene row. A click anywhere in it colors the highlighted panel by the gene: its name is the row's button for the
+   * keyboard (pressed while the panel shows the gene alone). The layers toggle at its end adds or removes the gene's
+   * "detected" overlay; it shows while the row is hovered or focused, and stays while the overlay is there. The toggle
+   * keeps its name in both states (its state is aria-pressed, its title says what a click does). paintGeneRow() writes
+   * what depends on the highlighted panel.
    */
   function geneRow(g) {
     const gene = String(g.gene);
-    const show = h('button', {
-      class: 'btn small', type: 'button', 'aria-label': `Show on map: ${gene}`, onClick: () => showGene(gene),
-    }, buttonFace('map', 'Show on map'));
+    const show = h('button', { class: 'dx-row-btn dx-gene-btn', type: 'button', 'aria-pressed': 'false' }, gene);
     const toggle = h('button', {
-      class: 'btn small ghost', type: 'button', 'aria-label': `Overlay: ${gene}`, 'aria-pressed': 'false',
-      onClick: () => toggleGeneOverlay(gene),
-    });
+      class: 'btn small ghost icon-only toggle', type: 'button',
+      'aria-label': `Show ${gene} as an overlay`, 'aria-pressed': 'false',
+      onClick: (e) => {
+        e.stopPropagation(); // the overlay only: the row's click would also color the map by the gene
+        toggleGeneOverlay(gene);
+      },
+    }, icon('layers', { size: 14 }));
+    const actions = h('span', { class: 'row-actions' }, toggle);
     const tr = h('tr', null,
-      h('td', { class: 'mono dx-gene' }, gene),
+      h('td', { class: 'mono dx-gene' }, show),
       h('td', { class: 'num' }, fmt.int(g.total_umi)),
       h('td', { class: 'num dx-col-bins' }, fmt.int(g.n_bins_detected)),
       h('td', { title: `${fmt.int(g.n_bins_detected)} bins detect ${gene}` }, pctBar(g.pct_bins_detected)),
-      h('td', { class: 'dx-act' }, h('div', { class: 'dx-gene-actions' }, show, toggle)));
-    geneRows.push({ gene, tr, show, toggle });
+      h('td', { class: 'dx-act' }, actions));
+    rowAction(tr, show, () => showGene(gene));
+    geneRows.push({ gene, tr, show, toggle, actions });
     return tr;
   }
 
-  /** A gene row as the highlighted panel has it: the toggle pressed, with a check, while the overlay is there. */
-  function paintGeneRow({ gene, tr, show, toggle }, overlays, at) {
+  /**
+   * A gene row as the highlighted panel has it: marked (and its name pressed) while the panel is colored by the gene
+   * alone, the toggle pressed and kept visible while the gene's overlay is there.
+   */
+  function paintGeneRow({ gene, tr, show, toggle, actions }, colored, overlays, at) {
+    const shown = colored.length === 1 && colored[0] === gene;
     const on = overlays.includes(GENE_OVERLAY + gene);
-    tr.classList.toggle('dx-on-map', on);
+    tr.classList.toggle('dx-on-map', shown);
+    show.setAttribute('aria-pressed', String(shown));
     show.title = `Color ${at} by the UMIs of ${gene}`;
-    toggle.title = on ? `The bins of ${at} that detect ${gene} are marked; click to remove the overlay` : `Mark the bins of ${at} that detect ${gene}`;
-    if (toggle.firstChild && toggle.getAttribute('aria-pressed') === String(on)) return;
     toggle.setAttribute('aria-pressed', String(on));
-    toggle.classList.toggle('active', on);
-    mount(toggle, buttonFace(on ? 'check' : 'layers', 'Overlay'));
+    toggle.title = on ? `Remove the ${gene} overlay from ${at}` : `Add ${gene} as an overlay on ${at}`;
+    actions.classList.toggle('keep', on);
   }
 
   /** Bring the rows painted up to date with the highlighted panel, in place (a row button keeps the focus). */
   function paintGeneRows() {
     genesShownFor = rowsKey();
+    const colored = targetGenes();
     const overlays = targetOverlays();
     const at = where();
-    for (const row of geneRows) paintGeneRow(row, overlays, at);
+    const head = geneBody.querySelector('th.dx-gene-th');
+    if (head) head.title = `Click a gene to color ${at} by it`;
+    for (const row of geneRows) paintGeneRow(row, colored, overlays, at);
   }
 
   function paintGenes() {
@@ -649,11 +703,11 @@ export function dataExplorer({ projectId, name = '', state: st, getConfig, focus
     mount(geneBody,
       h('div', { class: 'table-wrap dx-gene-wrap' }, h('table', { class: 'table compact dx-gene-table' },
         h('thead', null, h('tr', null,
-          h('th', null, 'Gene'),
+          h('th', { class: 'dx-gene-th' }, 'Gene'), // its title follows the panel count (paintGeneRows())
           h('th', { class: 'num', title: 'UMIs of the gene in the whole section' }, 'UMIs'),
           h('th', { class: 'num dx-col-bins', title: 'Bins with at least one UMI of the gene' }, 'Bins detecting it'),
           h('th', { title: 'Share of the bins of the section that detect the gene' }, '% of bins'),
-          h('th', null, h('span', { class: 'sr-only' }, 'Actions')))),
+          h('th', null, h('span', { class: 'sr-only' }, 'Overlay')))),
         h('tbody', null, genes.map(geneRow)))),
       more ? h('div', { class: 'row' }, more) : null);
     paintGeneRows();

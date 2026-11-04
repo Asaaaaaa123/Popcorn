@@ -222,6 +222,8 @@ main#view { flex: 1 1 auto; min-width: 0; }
 .btn.danger.solid:hover:not(:disabled) { background: color-mix(in srgb, var(--danger-solid) 88%, #ffffff); }
 .btn.ghost { border-color: transparent; background: transparent; color: var(--text-muted); }
 .btn.ghost:hover:not(:disabled) { background: var(--surface-2); color: var(--text); }
+.btn.ghost.danger { color: var(--danger); }
+.btn.ghost.danger:hover:not(:disabled) { background: var(--danger-soft); color: var(--danger); }
 .btn.small { height: 28px; padding: 0 10px; font-size: 12.5px; }
 .btn.icon-only { width: 32px; padding: 0; }
 .btn.small.icon-only { width: 28px; }
@@ -231,6 +233,46 @@ main#view { flex: 1 1 auto; min-width: 0; }
 .btn-group .btn:first-child { border-radius: var(--radius-sm) 0 0 var(--radius-sm); margin-left: 0; }
 .btn-group .btn:last-child { border-radius: 0 var(--radius-sm) var(--radius-sm) 0; }
 .btn-group .btn.active { background: var(--accent-soft); color: var(--accent-text); border-color: color-mix(in srgb, var(--accent) 70%, transparent); position: relative; z-index: 1; }
+/* an icon button that stays on (aria-pressed), e.g. a layer shown on the map */
+.btn.toggle[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent-text); border-color: color-mix(in srgb, var(--accent) 60%, transparent); }
+.btn .caret { margin: 0 -3px 0 -1px; opacity: 0.7; }
+.btn.menu-trigger[aria-expanded="true"] { background: var(--surface-3); border-color: var(--border-hover); color: var(--text); }
+.btn.ghost.menu-trigger[aria-expanded="true"] { border-color: transparent; }
+
+/* ---------------------------------------------------------------- menus (menuButton in core.js) */
+.menu-pop {
+  position: fixed; z-index: 950; min-width: 220px; max-width: min(360px, calc(100vw - 16px)); padding: 5px;
+  background: var(--surface-2); border: 1px solid var(--border-strong); border-radius: var(--radius);
+  box-shadow: var(--shadow-lg); animation: menu-in 0.1s ease-out;
+}
+.menu-pop:focus, .menu-pop:focus-visible { outline: none; box-shadow: var(--shadow-lg); }
+.menu-item {
+  display: flex; align-items: flex-start; gap: 10px; width: 100%; padding: 7px 10px;
+  border: 0; border-radius: 5px; background: none; color: var(--text);
+  font: 500 13px/1.35 var(--font); text-align: left; cursor: pointer; text-decoration: none;
+}
+.menu-item > .icon { margin-top: 1px; color: var(--text-muted); }
+.menu-item:hover, .menu-item:focus { background: var(--surface-3); outline: none; text-decoration: none; }
+.menu-item:focus-visible { box-shadow: inset 0 0 0 2px rgba(61, 124, 245, 0.55); border-radius: 5px; }
+.menu-item:disabled { opacity: 0.45; cursor: not-allowed; background: none; }
+.menu-item.danger, .menu-item.danger > .icon { color: var(--danger); }
+.menu-item.danger:hover, .menu-item.danger:focus { background: var(--danger-soft); }
+.menu-text { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.menu-hint { color: var(--text-faint); font-size: 11.5px; font-weight: 400; line-height: 1.35; }
+.menu-icon-pad { width: 15px; flex: 0 0 15px; }
+.menu-sep { height: 1px; margin: 5px 4px; background: var(--border); }
+.menu-heading { padding: 7px 10px 3px; color: var(--text-faint); font-size: 10.5px; font-weight: 650; letter-spacing: 0.07em; text-transform: uppercase; }
+@keyframes menu-in { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
+
+/* secondary buttons of a table row or list item: shown while the row is hovered or holds the focus (any of its links,
+   fields or buttons; always on touch screens); a row whose action is on (e.g. a pressed toggle) keeps it visible with
+   .keep. A row that is not a tr or li says so with .has-row-actions. */
+.row-actions { display: inline-flex; gap: 2px; align-items: center; justify-content: flex-end; opacity: 0; transition: opacity 0.12s; }
+tr:hover .row-actions, li:hover .row-actions, .has-row-actions:hover .row-actions,
+tr:focus-within .row-actions, li:focus-within .row-actions, .has-row-actions:focus-within .row-actions,
+.row-actions:focus-within, .row-actions.keep { opacity: 1; }
+.row-actions:has(.menu-trigger[aria-expanded="true"]) { opacity: 1; }
+@media (hover: none) { .row-actions { opacity: 1; } }
 
 /* ---------------------------------------------------------------- forms */
 .field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }

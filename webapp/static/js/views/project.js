@@ -178,20 +178,37 @@ function projectView(container, d, defaults, initialTab) {
   const nameInput = h('input', { class: 'title-input', value: d.name, 'aria-label': 'Project name', spellcheck: false, autocomplete: 'off', maxlength: 200 });
   const crumbName = h('span', { class: 'truncate' });
   const meta = h('div', { class: 'subtitle project-meta' });
-  const vchips = h('div', { class: 'vchips' });
-  const vpanelId = `vpanel-${d.id}`;
-  const vpanel = h('div', { class: 'card vpanel hidden', id: vpanelId });
   const conflict = h('div');
   const tabsHost = h('div', { class: 'project-tabs' });
   const body = h('div', { class: 'project-body' });
-  const saveBtn = button({ label: 'Save', icon: 'save', kind: 'primary', onClick: () => { save(); } });
-  const discardBtn = button({ label: 'Discard', icon: 'undo', onClick: () => { discard(); } });
-  const validateBtn = button({ label: 'Validate data', icon: 'check', onClick: () => { validateNow(true); } });
-  saveBtn.title = 'Save the project settings (Ctrl+S)';
-  discardBtn.title = 'Drop the unsaved changes';
-  validateBtn.title = 'Check the sample folders and the genes against the data, with your current (unsaved) settings';
+
+  // The header holds one control: the status chip of the configuration check. It is built once and updated in place
+  // (paintChips), so it keeps the focus while it opens and closes the check panel below the header. The panel lists
+  // the errors and warnings and holds the manual data check (the former "Validate data" button).
+  const vpanelId = `vpanel-${d.id}`;
+  const vchip = h('button', {
+    type: 'button', class: 'vchip', 'aria-expanded': 'false', 'aria-controls': vpanelId,
+    onClick: () => { vOpen = !vOpen; paintChips(); },
+  });
+  const vScope = h('span', { class: 'muted small' });
+  const vClose = button({ icon: 'x', kind: 'ghost', small: true, title: 'Close', onClick: () => { vOpen = false; paintChips(); vchip.focus(); } });
+  vClose.setAttribute('aria-label', 'Close the configuration check');
+  const vList = h('div', { class: 'stack' });
+  const vData = h('span', { class: 'muted small' });
+  // aria-disabled rather than disabled while a check runs, so that the focus stays on the button
+  const checkBtn = button({ label: 'Check the data again', icon: 'refresh', small: true, onClick: () => { if (!d.checking) validateNow(true); } });
+  checkBtn.title = 'Check the sample folders and the genes against the data, with your current (unsaved) settings';
+  const vpanel = h('div', { class: 'card vpanel hidden', id: vpanelId },
+    h('div', { class: 'card-body stack' },
+      h('div', { class: 'row vpanel-head' }, h('h3', null, 'Configuration check'), vScope, h('span', { class: 'spacer' }), vClose),
+      vList,
+      h('div', { class: 'vpanel-foot' }, checkBtn, vData)));
+
+  // Saving and discarding live in the bar at the bottom, shown only while there are unsaved changes (and Ctrl+S).
   const barSave = button({ label: 'Save', icon: 'save', kind: 'primary', small: true, onClick: () => { save(); } });
   const barDiscard = button({ label: 'Discard', small: true, onClick: () => { discard(); } });
+  barSave.title = 'Save the project settings (Ctrl+S)';
+  barDiscard.title = 'Drop the unsaved changes';
   const unsavedBar = h('div', { class: 'unsaved-bar hidden', role: 'status' },
     icon('alert', { size: 16 }), h('strong', null, 'Unsaved changes'),
     h('span', { class: 'muted small' }, 'Saved settings are what runs use. Ctrl+S saves.'),
@@ -211,7 +228,7 @@ function projectView(container, d, defaults, initialTab) {
     h('div', { class: 'breadcrumb' }, h('a', { href: '#/projects' }, 'Projects'), icon('chevron-right', { size: 12 }), crumbName),
     h('div', { class: 'page-header project-head' },
       h('div', { class: 'titles' }, nameInput, meta),
-      h('div', { class: 'actions' }, vchips, validateBtn, discardBtn, saveBtn)),
+      h('div', { class: 'actions' }, vchip)),
     vpanel, conflict, tabsHost, body, unsavedBar));
 
   function setButton(btn, busy, iconName, label) {
@@ -226,9 +243,9 @@ function projectView(container, d, defaults, initialTab) {
   let chipsSig = '';
   let tabsSig = '';
 
-  // The chips show the check of the unsaved settings while there are any (POST /validate with data: false, a moment
+  // The chip shows the check of the unsaved settings while there are any (POST /validate with data: false, a moment
   // after each change), so that a deleted signature still selected somewhere is an error at once, not after saving.
-  // Until that check answers they show the saved settings' check, and say so.
+  // Until that check answers it shows the saved settings' check, and says so.
   function draftCheck() {
     return d.dirty && d.draftCheck && d.draftCheck.key === JSON.stringify(d.config) ? d.draftCheck : null;
   }
@@ -249,43 +266,54 @@ function projectView(container, d, defaults, initialTab) {
       d.draftCheck = { key, ...normValidation(res) };
     } catch (e) {
       if (e && e.name === 'AbortError') return;
-      d.draftCheck = null;   // the chips keep showing the saved settings' check
+      d.draftCheck = null;   // the chip keeps showing the saved settings' check
     } finally {
       if (draftAbort === ctrl) draftAbort = null;
     }
     if (alive) paintChips();
   }
 
+  /** One line on the data check (sample folders and genes against the data), shown next to "Check the data again". */
+  function dataCheckLine() {
+    if (d.checking) return 'Checking the data…';
+    if (d.reportError) return `The last data check failed: ${d.reportError.message || d.reportError}`;
+    if (!d.report) return 'The data has not been checked yet.';
+    const errs = (d.report.errors || []).length;
+    const warns = (d.report.warnings || []).length;
+    const found = [errs ? plural(errs, 'problem') : null, warns ? plural(warns, 'warning') : null].filter(Boolean);
+    return `Data checked ${fmt.ago(d.reportAt)}${reportStale() ? ' (settings changed since)' : ''}: ${found.length ? `${found.join(', ')}; details in the Data tab` : 'no problems'}.`;
+  }
+
   function paintChips() {
     const draft = draftCheck();
     const { errors, warnings } = draft || d.validation;
-    const sig = JSON.stringify([errors, warnings, vOpen, d.dirty, !!draft]);
+    const dataLine = dataCheckLine();
+    const sig = JSON.stringify([errors, warnings, vOpen, d.dirty, !!draft, d.checking, dataLine]);
     if (sig === chipsSig) return;
     chipsSig = sig;
     const scope = draft ? 'Check of your unsaved settings; runs use the saved settings until you save.'
       : d.dirty ? 'Check of the saved settings; your unsaved changes are being checked.' : 'Check of the saved settings.';
-    const chip = (kind, text) => h('button', {
-      type: 'button', class: `vchip ${kind}`, 'aria-expanded': String(vOpen), 'aria-controls': vpanelId, title: scope,
-      onClick: () => { vOpen = !vOpen; paintChips(); },
-    }, icon('alert', { size: 13 }), text);
-    mount(vchips,
-      errors.length ? chip('bad', plural(errors.length, 'error')) : null,
-      warnings.length ? chip('warn', plural(warnings.length, 'warning')) : null,
-      !errors.length && !warnings.length ? h('span', { class: 'vchip ok', title: scope }, icon('check', { size: 13 }), 'Settings valid') : null);
-    if (vOpen && (errors.length || warnings.length)) {
-      mount(vpanel, h('div', { class: 'card-body stack' },
-        h('div', { class: 'row between' }, h('h3', null, 'Configuration check'),
-          h('span', { class: 'muted small' }, draft ? 'Your unsaved settings; runs use the saved ones until you save.'
-            : d.dirty ? 'Saved settings; your unsaved changes are being checked.' : 'Saved settings.'),
-          button({ icon: 'x', kind: 'ghost', small: true, title: 'Close', onClick: () => { vOpen = false; paintChips(); } })),
-        errors.length ? banner('danger', [h('strong', null, `${plural(errors.length, 'error')}: runs cannot start until they are fixed.`), h('ul', null, errors.map((t) => h('li', null, t)))]) : null,
-        warnings.length ? banner('warning', [h('strong', null, plural(warnings.length, 'warning')), h('ul', null, warnings.map((t) => h('li', null, t)))]) : null));
-      vpanel.classList.remove('hidden');
-    } else {
-      vOpen = false;
-      mount(vpanel);
-      vpanel.classList.add('hidden');
-    }
+    const kind = errors.length ? 'bad' : warnings.length ? 'warn' : 'ok';
+    const counts = [errors.length ? plural(errors.length, 'error') : null, warnings.length ? plural(warnings.length, 'warning') : null].filter(Boolean);
+    const text = counts.length ? counts.join(', ') : 'Settings valid';
+    vchip.className = `vchip ${kind}`;
+    vchip.title = d.checking ? `${scope} Checking the data…` : scope;
+    vchip.setAttribute('aria-label', `Configuration check: ${text}`);
+    vchip.setAttribute('aria-expanded', String(vOpen));
+    // while a data check runs, a small spinner takes the place of the icon (the count stays readable)
+    mount(vchip, d.checking ? h('span', { class: 'spinner', 'aria-hidden': 'true' }) : icon(kind === 'ok' ? 'check' : 'alert', { size: 13 }),
+      text, icon('chevron-down', { size: 12, cls: 'vchip-caret' }));
+    vpanel.classList.toggle('hidden', !vOpen);
+    if (!vOpen) return;
+    vScope.textContent = draft ? 'Your unsaved settings; runs use the saved ones until you save.'
+      : d.dirty ? 'Saved settings; your unsaved changes are being checked.' : 'Saved settings.';
+    mount(vList,
+      errors.length ? banner('danger', [h('strong', null, `${plural(errors.length, 'error')}: runs cannot start until they are fixed.`), h('ul', null, errors.map((t) => h('li', null, t)))]) : null,
+      warnings.length ? banner('warning', [h('strong', null, plural(warnings.length, 'warning')), h('ul', null, warnings.map((t) => h('li', null, t)))]) : null,
+      !errors.length && !warnings.length ? h('div', { class: 'state ok' }, icon('check', { size: 13 }), 'No problems found in the settings.') : null);
+    setButton(checkBtn, d.checking, 'refresh', d.checking ? 'Checking…' : 'Check the data again');
+    checkBtn.setAttribute('aria-disabled', String(d.checking));
+    vData.textContent = d.checking ? '' : dataLine;
   }
 
   function signaturesWithMissingGenes() {
@@ -332,12 +360,9 @@ function projectView(container, d, defaults, initialTab) {
     nameInput.title = named ? 'Click to rename' : 'The project needs a name';
     crumbName.textContent = d.name.trim() || d.id;
     mount(meta, h('span', { class: 'mono' }, d.id), ` · created ${fmt.date(d.created)} · saved ${fmt.ago(d.updated)}`);
-    for (const b of [saveBtn, barSave]) b.disabled = !d.dirty || d.saving;
-    for (const b of [discardBtn, barDiscard]) b.disabled = !d.dirty || d.saving;
-    setButton(saveBtn, d.saving, 'save', d.saving ? 'Saving…' : 'Save');
+    barSave.disabled = !d.dirty || d.saving;
+    barDiscard.disabled = !d.dirty || d.saving;
     setButton(barSave, d.saving, 'save', d.saving ? 'Saving…' : 'Save');
-    validateBtn.disabled = d.checking;
-    setButton(validateBtn, d.checking, 'check', d.checking ? 'Checking…' : 'Validate data');
     unsavedBar.classList.toggle('hidden', !d.dirty);
     paintChips();
     paintTabs();
@@ -586,7 +611,8 @@ function projectView(container, d, defaults, initialTab) {
     qcSel.addEventListener('change', () => { cfg.qc_bin_size = qcSel.value; changed({ data: true }); });
     const editor = sampleEditor({ cfg, report: d.report, onChange: () => changed({ data: true }), onExplore: openExplore });
     const reportBox = h('div');
-    const recheck = button({ label: 'Check again', icon: 'refresh', small: true, onClick: () => { validateNow(true); } });
+    const recheck = button({ label: 'Check again', icon: 'refresh', small: true, kind: 'ghost', onClick: () => { validateNow(true); } });
+    recheck.title = 'Check the data again with the settings above';
 
     function fillBins() {
       const found = ((d.report && d.report.samples) || []).filter((s) => s.bin_dir && Array.isArray(s.bin_sizes));
@@ -657,7 +683,7 @@ function projectView(container, d, defaults, initialTab) {
   }
 
   // ---- Explore
-  /** Open the Explore tab, on section `sid` when given (the Data tab's Explore actions). */
+  /** Open the Explore tab, on section `sid` when given (the Data tab's links: a section's bin count, the data check). */
   function openExplore(sid) {
     d.ui.exploreFocus = sid || null;
     switchTab('explore');
@@ -915,15 +941,23 @@ function projectView(container, d, defaults, initialTab) {
         mount(runsBox, h('p', { class: 'muted' }, 'No runs yet.'));
         return;
       }
-      mount(runsBox, h('div', { class: 'table-wrap' }, h('table', { class: 'table compact' },
+      // the whole row opens the run; the label stays a link for the keyboard (and for opening it in a new tab)
+      mount(runsBox, h('div', { class: 'table-wrap' }, h('table', { class: 'table compact project-runs' },
         h('thead', null, h('tr', null, h('th', null, 'Run'), h('th', null, 'Status'), h('th', null, 'Created'), h('th', { class: 'num' }, 'Duration'), h('th', null, 'Progress'))),
         h('tbody', null, runs.map((r) => {
           const href = `#/runs/${enc(r.id)}`;
           const prog = r.progress || {};
           const active = r.status === 'running' || r.status === 'queued';
-          return h('tr', null,
+          return h('tr', {
+            class: 'clickable',
+            onClick: (e) => {
+              if (e.target.closest('a, button, input, select, textarea')) return;
+              if (String(window.getSelection ? window.getSelection() : '').trim()) return;   // selecting text is not a click
+              navigate(`/runs/${enc(r.id)}`);
+            },
+          },
             h('td', null, h('a', { href }, r.label || r.id), r.label ? h('div', { class: 'mono small muted' }, r.id) : null),
-            h('td', null, h('a', { href, class: 'plain-link' }, statusBadge(r.status))),
+            h('td', null, statusBadge(r.status)),
             h('td', { title: fmt.date(r.created) }, fmt.ago(r.created)),
             h('td', { class: 'num' }, fmt.duration(r.duration_s)),
             h('td', null, active && r.status === 'running' && Number.isFinite(prog.fraction)
@@ -962,7 +996,11 @@ function projectView(container, d, defaults, initialTab) {
             field({ label: 'Run label (optional)', forId: labelId, control: labelInput, help: 'Shown in the list of runs.' }),
             h('div', { class: 'row' }, startBtn), errorBox),
         })),
-      card({ title: 'Runs of this project', actions: h('a', { class: 'btn small ghost', href: '#/runs' }, 'All runs'), body: runsBox })));
+      card({
+        title: 'Runs of this project',
+        actions: h('a', { class: 'project-runs-link', href: '#/runs' }, 'See all runs', icon('chevron-right', { size: 13 })),
+        body: runsBox,
+      })));
     paintStatus();
     startPolling();
     return {

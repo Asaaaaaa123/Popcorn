@@ -1,10 +1,16 @@
 // runs.js — the Runs page: every analysis run, newest first, with its status, live progress and actions.
-// Polls GET /api/runs every 3 s while a run is queued or running; the shell's health events wake it up when a run is
-// started elsewhere.
-import { h, api, mount, button, icon, card, statusBadge, emptyState, errorPanel, banner, loading, fmt, navigate, confirmDialog, toast, refreshHealth } from '../core.js';
+// The list keeps itself current, so it has no Refresh button: it polls GET /api/runs every 4 s while a run is queued
+// or running (paused while the page is hidden), refreshes when the window gets the focus back or the page becomes
+// visible, and the shell's health events wake it up when a run is started elsewhere. A row opens its run; its other
+// actions are in the row's "Run actions" menu (shown on hover or focus), and Cancel stays visible on an active run.
+import {
+  h, api, mount, button, menuButton, icon, card, statusBadge, emptyState, errorPanel, banner, loading, fmt, navigate,
+  confirmDialog, toast, refreshHealth,
+} from '../core.js';
 
 const ACTIVE = new Set(['queued', 'running']);
-const POLL_MS = 3000;
+const POLL_MS = 4000;
+const WAKE_GAP_MS = 1500; // focus and visibilitychange often come together: one refresh answers both
 const STATUS_FILTERS = [
   { id: '', label: 'All statuses', test: () => true },
   { id: 'active', label: 'Queued or running', test: (r) => ACTIVE.has(r.status) },
@@ -14,6 +20,7 @@ const STATUS_FILTERS = [
 ];
 
 const runHref = (id) => `#/runs/${encodeURIComponent(id)}`;
+const projectHref = (id) => `#/projects/${encodeURIComponent(id)}`;
 
 function elapsedSince(iso) {
   const t = iso ? new Date(iso).getTime() : NaN;
@@ -65,6 +72,8 @@ export async function renderRuns(container) {
   let ctrl = null;
   let failures = 0;
   let refreshError = null;
+  let lastLoad = 0;
+  let repaintTimer = null;
   const filters = { project: '', status: '' };
 
   const subtitle = h('div', { class: 'subtitle' }, 'Every analysis started from a project, newest first.');
@@ -74,7 +83,6 @@ export async function renderRuns(container) {
     h('div', { class: 'page-header' },
       h('div', { class: 'titles' }, h('h1', null, 'Runs'), subtitle),
       h('div', { class: 'actions' },
-        button({ label: 'Refresh', icon: 'refresh', onClick: () => refresh() }),
         h('a', { class: 'btn primary', href: '#/projects' }, icon('play', { size: 16 }), 'Start a run'))),
     notice, body));
 
@@ -106,12 +114,29 @@ export async function renderRuns(container) {
     await refresh();
   }
 
+  // the row's secondary actions; read when the menu opens, from the run as this row shows it
+  function rowMenuItems(r) {
+    const active = ACTIVE.has(r.status);
+    return [
+      r.project_id ? { label: 'Open project', icon: 'folder', hint: r.project_name || r.project_id, href: projectHref(r.project_id) } : null,
+      'separator',
+      {
+        label: 'Delete run', icon: 'trash', danger: true, disabled: active,
+        hint: active ? 'Cancel the run before deleting it' : null, onClick: () => deleteRun(r),
+      },
+    ];
+  }
+
   function row(r, queuePos) {
     const active = ACTIVE.has(r.status);
-    const actions = active
+    // an active run keeps a visible Cancel; everything else is in the row's menu, revealed on hover or focus
+    const cancel = active
       ? button({ label: 'Cancel', icon: 'stop', small: true, kind: 'ghost danger', title: 'Cancel this run', onClick: () => cancelRun(r) })
-      : button({ label: 'Delete', icon: 'trash', small: true, kind: 'ghost', title: 'Delete this run', onClick: () => deleteRun(r) });
-    actions.dataset.action = active ? 'cancel' : 'delete';
+      : null;
+    if (cancel) cancel.dataset.action = 'cancel';
+    const more = menuButton({ small: true, title: 'Run actions', items: () => rowMenuItems(r) });
+    more.setAttribute('aria-label', `Actions for run ${r.label || r.id}`);
+    more.dataset.action = 'more';
     return h('tr', {
       class: 'clickable', dataset: { id: r.id },
       onClick: (e) => {
@@ -124,12 +149,12 @@ export async function renderRuns(container) {
       h('a', { href: runHref(r.id), dataset: { action: 'open' } }, r.label || 'Untitled run'),
       h('div', { class: 'mono faint small' }, r.id)),
     h('td', null, r.project_id
-      ? h('a', { href: `#/projects/${encodeURIComponent(r.project_id)}`, dataset: { action: 'project' } }, r.project_name || r.project_id)
+      ? h('a', { href: projectHref(r.project_id), dataset: { action: 'project' } }, r.project_name || r.project_id)
       : h('span', { class: 'muted' }, r.project_name || '—')),
     h('td', { class: 'nowrap', title: fmt.date(r.created) }, fmt.ago(r.created)),
     h('td', { class: 'nowrap num' }, durationCell(r)),
     h('td', { class: 'runs-progress-cell' }, progressCell(r, queuePos)),
-    h('td', { class: 'right nowrap' }, actions));
+    h('td', { class: 'runs-actions-cell' }, h('div', { class: 'runs-actions' }, cancel, h('span', { class: 'row-actions' }, more))));
   }
 
   // filter bar and table are built once and updated in place, so a poll never steals focus or closes a select
@@ -168,11 +193,20 @@ export async function renderRuns(container) {
     const focusTr = focused && tbody.contains(focused) ? focused.closest('tr') : null;
     const focusKey = focusTr ? [focusTr.dataset.id, focused.dataset.action] : null;
     const old = [...tbody.children];
+    let held = false;
     if (old.length === rows.length && old.every((tr, i) => tr.dataset.id === rows[i].dataset.id)) {
-      old.forEach((tr, i) => { if (tr.outerHTML !== rows[i].outerHTML) tr.replaceWith(rows[i]); });
+      old.forEach((tr, i) => {
+        // a row whose menu is open keeps its button (the open menu belongs to it) and is updated a moment later
+        if (tr.querySelector('.menu-trigger[aria-expanded="true"]')) { held = true; return; }
+        if (tr.outerHTML !== rows[i].outerHTML) tr.replaceWith(rows[i]);
+      });
+    } else if (tbody.querySelector('.menu-trigger[aria-expanded="true"]')) {
+      held = true; // a changed set of runs is rebuilt once the open menu has closed, not under it
     } else {
       mount(tbody, rows);
     }
+    clearTimeout(repaintTimer);
+    repaintTimer = held ? setTimeout(() => { repaintTimer = null; paint(); }, 1000) : null;
     if (focusKey && !tbody.contains(document.activeElement)) {
       const tr = [...tbody.children].find((t) => t.dataset.id === focusKey[0]);
       const target = tr && focusKey[1] ? tr.querySelector(`[data-action="${focusKey[1]}"]`) : null;
@@ -192,8 +226,9 @@ export async function renderRuns(container) {
       mount(body, card({
         body: emptyState({
           icon: 'activity', title: 'No runs yet',
-          text: 'A run is one analysis of a project: its configuration is frozen, the pipeline runs in the background and the results stay here. Open a project, validate it and start a run from its Run tab.',
-          action: h('a', { class: 'btn primary', href: '#/projects' }, icon('folder', { size: 16 }), 'Go to projects'),
+          text: 'A run is one analysis of a project: its configuration is frozen, the pipeline runs in the background and the results stay here. Open a project, check its data and start a run from its Run tab.',
+          // secondary: "Start a run" in the header is the page's one primary action and leads to the same place
+          action: h('a', { class: 'btn', href: '#/projects' }, icon('folder', { size: 16 }), 'Go to projects'),
         }),
       }));
       return;
@@ -218,10 +253,13 @@ export async function renderRuns(container) {
     paintRows(shown.map((r) => row(r, queuePos.get(r.id))));
   }
 
+  // poll while a run is queued or running, and retry after a failed refresh (the notice says "Retrying…"); a hidden
+  // page waits for onWake instead
   function schedule() {
     clearTimeout(timer);
     timer = null;
-    if (destroyed || !runs || !runs.some((r) => ACTIVE.has(r.status))) return;
+    if (destroyed || !runs || document.hidden) return;
+    if (!failures && !runs.some((r) => ACTIVE.has(r.status))) return;
     timer = setTimeout(refresh, failures ? Math.min(POLL_MS * 2 ** failures, 30000) : POLL_MS);
   }
 
@@ -232,6 +270,7 @@ export async function renderRuns(container) {
     if (ctrl) ctrl.abort();
     const my = new AbortController();
     ctrl = my;
+    lastLoad = Date.now();
     try {
       const list = await api('/api/runs', { signal: my.signal });
       if (destroyed || ctrl !== my) return;
@@ -263,12 +302,23 @@ export async function renderRuns(container) {
   };
   window.addEventListener('health', onHealth);
 
+  // back in the window or tab (runs may have been started, finished or deleted meanwhile): refresh at once
+  const onWake = () => {
+    if (destroyed || document.hidden || Date.now() - lastLoad < WAKE_GAP_MS) return;
+    refresh();
+  };
+  window.addEventListener('focus', onWake);
+  document.addEventListener('visibilitychange', onWake);
+
   await refresh();
 
   return () => {
     destroyed = true;
     clearTimeout(timer);
+    clearTimeout(repaintTimer);
     if (ctrl) ctrl.abort();
     window.removeEventListener('health', onHealth);
+    window.removeEventListener('focus', onWake);
+    document.removeEventListener('visibilitychange', onWake);
   };
 }
