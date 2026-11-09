@@ -7,6 +7,9 @@ per-bin spatial maps. The command line keeps working as before.
 
 What was wrong in the original scripts, and which manuscript numbers change because of it: **[CHANGES.md](CHANGES.md)**.
 
+How to use it, step by step with screenshots, on the hosted version (https://backend.asagene.aurorarangers.ca/popcorn/)
+or on your own computer: **[HOW_TO.md](HOW_TO.md)**.
+
 ## Start
 
 **Windows** (PowerShell, in this folder):
@@ -149,6 +152,7 @@ The outputs and their columns are listed in [docs/ARCHITECTURE.md](docs/ARCHITEC
 | `bone_pending_masks.py` | hand-drawn region of interest (GeoJSON → per-bin mask) |
 | `pipeline_config.py` | the configuration: defaults = manuscript setup, validation, parameter help |
 | `webapp/` | the web application (FastAPI server, job runner, browser interface) |
+| `HOW_TO.md` | step-by-step guide to the web application (screenshots in `docs/howto/`) |
 | `tools/make_demo_data.py` | synthetic Visium HD data for the demo and the tests |
 | `tools/compare_with_original.py` | reruns the original code on the same data and compares |
 | `tests/` | `python -m pytest` (the slow end-to-end ones run the whole analysis on tiny data; `-m "not slow"` skips them) |
